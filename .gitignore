@@ -1,0 +1,7 @@
+results/
+analysis/
+CLAUDE.md
+__pycache__/
+*.pyc
+*.pkl
+langchain_smart_contract_chromadb/
