@@ -1,0 +1,22 @@
+# Resultados de experimentos
+results/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Checkpoints de embedding
+*.pkl
+
+# Ambientes virtuais
+venv/
+.venv/
+env/
+
+# Secrets
+.env
+
+# Jupyter
+.ipynb_checkpoints/
