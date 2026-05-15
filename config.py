@@ -63,6 +63,8 @@ class AgentConfig:
     use_reviewer: bool = True
     # If False, the Detector runs alone and its result becomes the final result
     reviewer_sees_code: bool = True  # always True in this project, documented here for clarity
+    # Maximum debate rounds before the Reconciler arbitrates (only used when use_reviewer=True)
+    max_rounds: int = 3
 
 
 # ─────────────────────────────────────────────

@@ -75,3 +75,14 @@ class RAGState(TypedDict):
 
     # Canonical description for the Reviewer (from vulnerabilities_description.csv)
     vuln_canonical_description: str
+
+    # Debate cycle control
+    current_round: int          # current debate round (starts at 1)
+    max_rounds: int             # maximum rounds before arbitration (default: 3)
+    consensus_reached: bool     # True when Reviewer confirms Detector (any verdict direction)
+    debate_history: list        # [{round, detector_verdict, detector_confidence,
+                                #   reviewer_verdict, reviewer_confidence}, ...]
+    reviewer_feedback: str      # structured objection injected into next Detector prompt
+
+    # Arbitration metrics (set by reconcile_node)
+    reconciliation_weight_ratio: float  # dominant weight ratio in weighted arbitration; 0.0 on consensus

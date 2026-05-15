@@ -88,12 +88,22 @@ def save_results(
     )
 
     # ── Per vulnerability ─────────────────────────────────────────────────────
+    agg_cols = {"tp": "sum", "fp": "sum", "tn": "sum", "fn": "sum"}
+    if "rounds_to_consensus" in successful.columns:
+        agg_cols["rounds_to_consensus"] = "mean"
+    if "consensus_reached" in successful.columns:
+        agg_cols["consensus_reached"] = "mean"
+
     vuln_df = (
         successful
-        .groupby(["run", "target_vulnerability"])[["tp", "fp", "tn", "fn"]]
-        .sum()
+        .groupby(["run", "target_vulnerability"])
+        .agg(agg_cols)
         .reset_index()
-        .rename(columns={"target_vulnerability": "vulnerability"})
+        .rename(columns={
+            "target_vulnerability": "vulnerability",
+            "consensus_reached": "consensus_rate",
+            "rounds_to_consensus": "avg_rounds_to_consensus",
+        })
     )
 
     # ── Global per run ────────────────────────────────────────────────────────
@@ -134,7 +144,10 @@ def save_results(
 
     # ── Agent mode info ───────────────────────────────────────────────────────
     use_reviewer = cfg.agent.use_reviewer
-    agent_mode = "Dual-Agent [Detector + Reviewer]" if use_reviewer else "Single-Agent [Detector only]"
+    agent_mode = (
+        f"Dual-Agent [Detector + Reviewer, max_rounds={cfg.agent.max_rounds}]"
+        if use_reviewer else "Single-Agent [Detector only]"
+    )
 
     # ── File paths ────────────────────────────────────────────────────────────
     pair_csv     = os.path.join(output_dir, "results_pairs.csv")
@@ -170,6 +183,7 @@ def save_results(
 | --- | --- |
 | Mode | `{agent_mode}` |
 | use_reviewer | `{use_reviewer}` |
+| max_rounds | `{cfg.agent.max_rounds}` |
 
 ### LLM
 
@@ -274,7 +288,18 @@ def save_results(
 | `reviewer_verdict` | CONFIRMED, REFUTED, or UNCERTAIN |
 | `reviewer_confidence` | Reviewer confidence (0.0–1.0) |
 | `reviewer_reasoning` | Reviewer explanation |
-| `reconciliation_rule` | Which of the 6 reconciliation rules was applied |
+| `reconciliation_rule` | `consensus_round_N` or `weighted_arbitration_round_N` (or `rule_0_detector_only`) |
+| `rounds_to_consensus` | Rounds until agreement, or `max_rounds` on impasse |
+| `consensus_reached` | True if Reviewer confirmed Detector before the round limit |
+| `reconciliation_weight_ratio` | Dominant weight ratio in weighted arbitration (0.0 on consensus) |
+| `detector_confidence_delta` | Detector confidence change from round 1 to final round |
+
+### New columns in results_vuln.csv (dual-agent)
+
+| Column | Description |
+| --- | --- |
+| `avg_rounds_to_consensus` | Mean rounds to agreement per vulnerability type |
+| `consensus_rate` | Fraction of pairs that reached consensus (reveals controversial vulnerabilities) |
 """
 
     with open(summary_md, "w", encoding="utf-8") as f:

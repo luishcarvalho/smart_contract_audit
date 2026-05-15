@@ -126,6 +126,11 @@ def analyze_pair(
         final_verdict       = response.get("final_verdict", "ABSENT")
         final_confidence    = float(response.get("final_confidence", 0.0))
         reconciliation_rule = response.get("reconciliation_rule", "")
+        # Debate cycle metrics
+        rounds_to_consensus          = response.get("rounds_to_consensus", 1)
+        consensus_reached            = response.get("consensus_reached", False)
+        reconciliation_weight_ratio  = float(response.get("reconciliation_weight_ratio", 0.0))
+        detector_confidence_delta    = float(response.get("detector_confidence_delta", 0.0))
 
         # Issues always come from the Detector
         detector_issues = analysis.get("issues", []) or []
@@ -183,6 +188,11 @@ def analyze_pair(
             "reviewer_confidence": reviewer_confidence,
             "reviewer_reasoning": reviewer_reasoning,
             "reconciliation_rule": reconciliation_rule,
+            # Debate cycle columns
+            "rounds_to_consensus": rounds_to_consensus,
+            "consensus_reached": consensus_reached,
+            "reconciliation_weight_ratio": reconciliation_weight_ratio,
+            "detector_confidence_delta": detector_confidence_delta,
         }
 
     except Exception as e:
@@ -217,6 +227,11 @@ def analyze_pair(
             "reviewer_confidence": 0.0,
             "reviewer_reasoning": "",
             "reconciliation_rule": "",
+            # Debate cycle columns (empty on failure)
+            "rounds_to_consensus": 0,
+            "consensus_reached": False,
+            "reconciliation_weight_ratio": 0.0,
+            "detector_confidence_delta": 0.0,
         }
 
 

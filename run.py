@@ -84,6 +84,8 @@ def parse_args() -> argparse.Namespace:
     # Agent mode
     p.add_argument("--no-reviewer",  action="store_true", default=not _agent.use_reviewer,
                                      help="Disable the Reviewer agent (single-agent mode)")
+    p.add_argument("--max-rounds",   type=int, default=_agent.max_rounds,
+                                     help="Max debate rounds before arbitration (default: 3)")
 
     # Data
     p.add_argument("--train",   default=_data.train_path)
@@ -130,6 +132,7 @@ def main() -> None:
         ),
         agent=AgentConfig(
             use_reviewer=use_reviewer,
+            max_rounds=args.max_rounds,
         ),
         eval=EvalConfig(
             n_runs=args.runs,
@@ -149,12 +152,16 @@ def main() -> None:
         ),
     )
 
-    agent_mode_label = "Dual-Agent [Detector + Reviewer]" if use_reviewer else "Single-Agent [Detector only]"
+    agent_mode_label = (
+        f"Dual-Agent [Detector + Reviewer, max_rounds={cfg.agent.max_rounds}]"
+        if use_reviewer else "Single-Agent [Detector only]"
+    )
     banner("SMART CONTRACT AUDIT PIPELINE")
     print(f"Mode:        {agent_mode_label}")
     print(f"Model:       {cfg.llm.model}")
     print(f"Temperature: {cfg.llm.temperature}")
     print(f"RAG:         {cfg.retrieval.use_rag}  (top-k={cfg.retrieval.top_k})")
+    print(f"Max rounds:  {cfg.agent.max_rounds if use_reviewer else 'N/A (single-agent)'}")
     print(f"Runs:        {cfg.eval.n_runs}")
 
     # ── Load datasets ─────────────────────────────────────────────────────────

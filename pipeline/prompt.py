@@ -24,8 +24,7 @@ Use them only to calibrate what the pattern looks like in code.
 Do NOT mark PRESENT solely because the contract resembles these examples.
 
 {context}
-
-Smart Contract Code
+{reviewer_feedback}Smart Contract Code
 {query}
 
 ─── DETECTION ANALYSIS (think before you decide) ────────────────────────────
@@ -82,7 +81,7 @@ Target Vulnerability
 - Description: {vulnerability_description}
 
 {swc_section}
-Smart Contract Code
+{reviewer_feedback}Smart Contract Code
 {query}
 
 ─── DETECTION ANALYSIS (think before you decide) ────────────────────────────

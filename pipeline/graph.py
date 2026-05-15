@@ -3,16 +3,29 @@ LangGraph workflow builder for the dual-agent audit pipeline.
 
 Graph topologies (resolved at instantiation time):
 
-  RAG + Reviewer:
-    retrieve → generate_context → detector → reviewer → reconcile → parse_output → END
+  RAG + Reviewer (cyclic debate loop):
+    retrieve → generate_context → detector → reviewer
+                                                 │
+                                  ┌──────────────┴──────────────┐
+                              CONFIRMED                   REFUTED/UNCERTAIN
+                            or max_rounds                        │
+                                  │                         feedback_node
+                               reconcile                         │
+                                  │                      detector (round N)
+                             parse_output                        │
+                                  │                      reviewer (round N)
+                                 END                             │
+                                                       [consensus or max_rounds]
+                                                                 │
+                                                             reconcile → ...
 
-  RAG, no Reviewer:
+  RAG, no Reviewer (linear):
     retrieve → generate_context → detector → reconcile → parse_output → END
 
-  Direct + Reviewer:
-    detector → reviewer → reconcile → parse_output → END
+  Direct + Reviewer (cyclic, same loop as RAG+Reviewer but without retrieve/generate_context):
+    detector → reviewer → [loop as above]
 
-  Direct, no Reviewer:
+  Direct, no Reviewer (linear):
     detector → reconcile → parse_output → END
 """
 from __future__ import annotations
@@ -25,6 +38,7 @@ from langgraph.graph import END, StateGraph
 from smart_contract_audit_agents.config import Config
 from smart_contract_audit_agents.models.schemas import RAGState
 from smart_contract_audit_agents.pipeline.nodes import (
+    feedback_node,
     generate_context_node,
     make_detector_node,
     make_reconcile_node,
@@ -32,6 +46,20 @@ from smart_contract_audit_agents.pipeline.nodes import (
     make_reviewer_node,
     parse_output_node,
 )
+
+
+def should_continue_debate(state: RAGState) -> str:
+    """Conditional edge after reviewer_node.
+
+    Returns:
+      "reconcile" — consensus reached, or round limit hit (impasse → arbitration)
+      "feedback"  — continue debate for another round
+    """
+    if state.get("consensus_reached", False):
+        return "reconcile"
+    if state.get("current_round", 1) >= state.get("max_rounds", 3):
+        return "reconcile"
+    return "feedback"
 
 
 class AuditPipeline:
@@ -91,8 +119,17 @@ class AuditPipeline:
             graph.set_entry_point("detector")
 
         if use_reviewer:
+            graph.add_node("feedback", feedback_node)
             graph.add_edge("detector", "reviewer")
-            graph.add_edge("reviewer", "reconcile")
+            graph.add_conditional_edges(
+                "reviewer",
+                should_continue_debate,
+                {
+                    "reconcile": "reconcile",
+                    "feedback": "feedback",
+                },
+            )
+            graph.add_edge("feedback", "detector")
         else:
             graph.add_edge("detector", "reconcile")
 
@@ -145,11 +182,30 @@ class AuditPipeline:
             reconciliation_rule="",
             final_verdict="",
             final_confidence=0.0,
+            reconciliation_weight_ratio=0.0,
             # Canonical description for reviewer
             vuln_canonical_description=vuln_canonical_description,
+            # Debate cycle control
+            current_round=1,
+            max_rounds=self.cfg.agent.max_rounds,
+            consensus_reached=False,
+            debate_history=[],
+            reviewer_feedback="",
         )
 
         final_state = self.workflow.invoke(initial_state)
+
+        debate_history = final_state.get("debate_history", [])
+        current_round = final_state.get("current_round", 1)
+        consensus_reached = final_state.get("consensus_reached", False)
+        rounds_to_consensus = current_round if consensus_reached else final_state.get("max_rounds", 3)
+
+        detector_confidence_delta = 0.0
+        if len(debate_history) >= 2:
+            detector_confidence_delta = round(
+                debate_history[-1]["detector_confidence"] - debate_history[0]["detector_confidence"],
+                4,
+            )
 
         return {
             "json_output": json.dumps(final_state["parsed_output"]),
@@ -169,6 +225,12 @@ class AuditPipeline:
             "final_verdict": final_state.get("final_verdict", "ABSENT"),
             "final_confidence": final_state.get("final_confidence", 0.0),
             "reconciliation_rule": final_state.get("reconciliation_rule", ""),
+            # Debate cycle metrics
+            "rounds_to_consensus": rounds_to_consensus,
+            "consensus_reached": consensus_reached,
+            "debate_history": debate_history,
+            "reconciliation_weight_ratio": final_state.get("reconciliation_weight_ratio", 0.0),
+            "detector_confidence_delta": detector_confidence_delta,
         }
 
     # Alias kept for compatibility

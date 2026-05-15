@@ -6,7 +6,8 @@ Nodes:
   generate_context_node     — format retrieved docs as text (RAG only)
   make_detector_node        — Detector LLM call (active vulnerability search)
   make_reviewer_node        — Reviewer LLM call (devil's advocate validation)
-  make_reconcile_node       — deterministic reconciliation of Detector + Reviewer
+  feedback_node             — deterministic feedback synthesis + round increment
+  make_reconcile_node       — confidence-weighted arbitration (or consensus pass-through)
   parse_output_node         — assemble final parsed_output from state fields
 """
 from __future__ import annotations
@@ -166,12 +167,18 @@ def make_detector_node(
             + owasp_raw
         ) if owasp_raw else ""
 
+        reviewer_feedback_raw = state.get("reviewer_feedback", "")
+        reviewer_feedback_block = (
+            f"\n---\n{reviewer_feedback_raw}\n---\n\n" if reviewer_feedback_raw else ""
+        )
+
         fmt_kwargs = dict(
             query=code,
             vulnerability_name=state["vulnerability_name"],
             vulnerability_description=state["vulnerability_description"],
             format_instructions=_detector_parser.get_format_instructions(),
             swc_section=swc_section,
+            reviewer_feedback=reviewer_feedback_block,
         )
         if use_rag:
             fmt_kwargs["context"] = state.get("context", "")
@@ -249,6 +256,17 @@ def make_detector_node(
         state["detector_confidence"] = confidence
         state["detector_reasoning"] = summary
         state["detector_issues"] = [i if isinstance(i, dict) else {} for i in issues]
+
+        # Append a new entry to debate_history; reviewer fields filled later by reviewer_node
+        existing_history = list(state.get("debate_history", []))
+        existing_history.append({
+            "round": state.get("current_round", 1),
+            "detector_verdict": state["detector_verdict"],
+            "detector_confidence": confidence,
+            "reviewer_verdict": "",
+            "reviewer_confidence": 0.0,
+        })
+        state["debate_history"] = existing_history
 
         return state
 
@@ -360,18 +378,55 @@ def make_reviewer_node(
         state["reviewer_confidence"] = float(reviewer_data.get("reviewer_confidence", 0.0))
         state["reviewer_reasoning"] = str(reviewer_data.get("reviewer_reasoning", ""))
 
+        # Update the last debate_history entry with Reviewer results
+        updated_history = list(state.get("debate_history", []))
+        if updated_history:
+            updated_history[-1]["reviewer_verdict"] = verdict
+            updated_history[-1]["reviewer_confidence"] = state["reviewer_confidence"]
+        state["debate_history"] = updated_history
+
+        # CONFIRMED means Reviewer agrees with Detector regardless of verdict direction
+        state["consensus_reached"] = verdict == "CONFIRMED"
+
         return state
 
     return reviewer_node
 
 
-# ─── Reconciler node (deterministic, no LLM) ─────────────────────────────────
+# ─── Feedback node (deterministic, no LLM) ───────────────────────────────────
+
+def feedback_node(state: RAGState) -> dict:
+    """Synthesize the Reviewer's objection into structured feedback for the Detector.
+
+    Increments the round counter so the next Detector call knows it is in round N+1.
+    No LLM call — purely deterministic.
+    """
+    feedback = (
+        f"[Debate Round {state['current_round']} — Reviewer did not confirm]\n"
+        f"Reviewer verdict: {state['reviewer_verdict']} "
+        f"(confidence: {state['reviewer_confidence']:.2f})\n"
+        f"Reviewer reasoning: {state['reviewer_reasoning']}\n\n"
+        "Please reconsider your analysis taking into account the reviewer's objection above. "
+        "Focus especially on any points where your evidence may be insufficient or misidentified."
+    )
+    return {
+        "reviewer_feedback": feedback,
+        "current_round": state["current_round"] + 1,
+        "debate_history": state["debate_history"],
+    }
+
+
+# ─── Reconciler node (confidence-weighted arbitration, no LLM) ───────────────
 
 def make_reconcile_node(cfg: "Config"):
-    """Return a deterministic reconciliation node.
+    """Return a reconciliation node.
 
-    Applies one of 6 priority rules (or rule_0 when reviewer is disabled)
-    to produce final_verdict, final_confidence, and reconciliation_rule.
+    When reviewer is disabled: pass-through with rule_0_detector_only.
+    When reviewer is active:
+      - Consensus reached: penalty-adjusted confidence, rule = consensus_round_N.
+      - Impasse after max_rounds: calibrated confidence-weighted arbitration,
+        rule = weighted_arbitration_round_N.
+        Reference: ReConcile (Chen et al., 2024 — ACL). https://arxiv.org/abs/2309.13007
     """
     use_reviewer = cfg.agent.use_reviewer
 
@@ -381,59 +436,69 @@ def make_reconcile_node(cfg: "Config"):
 
         if not use_reviewer:
             state["final_verdict"] = d_verdict
-            state["final_confidence"] = d_conf
+            state["final_confidence"] = round(d_conf, 4)
             state["reconciliation_rule"] = "rule_0_detector_only"
+            state["reconciliation_weight_ratio"] = 0.0
             if state.get("debug", False):
                 print("=" * 80)
                 print("RECONCILIATION (DEBUG MODE)")
                 print("=" * 80)
-                print(f"Mode: single-agent (rule_0_detector_only)")
+                print("Mode: single-agent (rule_0_detector_only)")
                 print(f"Detector verdict: {d_verdict} | confidence: {d_conf:.3f}")
                 print(f"Final verdict:    {d_verdict} | confidence: {d_conf:.3f}")
                 print("=" * 80)
             return state
 
-        r_verdict = state.get("reviewer_verdict", "UNCERTAIN")
         r_conf = float(state.get("reviewer_confidence", 0.0))
+        current_round = state.get("current_round", 1)
 
-        # 6 priority rules
-        if d_verdict == "PRESENT" and r_verdict == "CONFIRMED":
-            final_verdict = "PRESENT"
-            final_confidence = (d_conf + r_conf) / 2
-            rule = "rule_1_detector_present_reviewer_confirmed"
-        elif d_verdict == "ABSENT" and r_verdict == "CONFIRMED":
-            final_verdict = "ABSENT"
-            final_confidence = (d_conf + r_conf) / 2
-            rule = "rule_2_detector_absent_reviewer_confirmed"
-        elif d_verdict == "PRESENT" and r_verdict == "REFUTED":
-            final_verdict = "ABSENT"
-            final_confidence = r_conf * 0.8
-            rule = "rule_3_detector_present_reviewer_refuted"
-        elif d_verdict == "ABSENT" and r_verdict == "REFUTED":
-            final_verdict = "PRESENT"
-            final_confidence = r_conf * 0.7
-            rule = "rule_4_detector_absent_reviewer_refuted"
-        elif d_verdict == "PRESENT" and r_verdict == "UNCERTAIN":
-            final_verdict = "PRESENT"
-            final_confidence = d_conf * 0.6
-            rule = "rule_5_detector_present_reviewer_uncertain"
-        else:  # ABSENT + UNCERTAIN (or any unexpected combination)
-            final_verdict = "ABSENT"
-            final_confidence = d_conf * 0.6
-            rule = "rule_6_detector_absent_reviewer_uncertain"
+        if state.get("consensus_reached", False):
+            # Consensus: penalize confidence for late rounds (earlier agreement = higher certainty)
+            rounds_penalty = (current_round - 1) * 0.05
+            final_confidence = max(d_conf - rounds_penalty, 0.1)
+            final_verdict = d_verdict
+            rule = f"consensus_round_{current_round}"
+            weight_ratio = 0.0
+        else:
+            # Impasse after max_rounds: calibrated confidence-weighted arbitration.
+            # Temperature < 1 softens overconfidence by compressing the weight distribution.
+            TEMPERATURE = 0.7
+            if d_verdict == "PRESENT":
+                w_present = d_conf ** (1 / TEMPERATURE)
+                w_absent = r_conf ** (1 / TEMPERATURE)
+            else:
+                w_absent = d_conf ** (1 / TEMPERATURE)
+                w_present = r_conf ** (1 / TEMPERATURE)
+
+            total = w_present + w_absent
+            if total == 0:
+                ratio_present = 0.5
+                final_confidence = 0.0
+                final_verdict = "ABSENT"
+                weight_ratio = 0.0
+            else:
+                ratio_present = w_present / total
+                final_confidence = max(w_present, w_absent) / total
+                final_verdict = "PRESENT" if ratio_present > 0.5 else "ABSENT"
+                weight_ratio = round(max(w_present, w_absent) / total, 4)
+
+            rule = f"weighted_arbitration_round_{current_round}"
 
         state["final_verdict"] = final_verdict
-        state["final_confidence"] = final_confidence
+        state["final_confidence"] = round(final_confidence, 4)
         state["reconciliation_rule"] = rule
+        state["reconciliation_weight_ratio"] = weight_ratio
 
         if state.get("debug", False):
+            r_verdict = state.get("reviewer_verdict", "UNCERTAIN")
             print("=" * 80)
             print("RECONCILIATION (DEBUG MODE)")
             print("=" * 80)
             print(f"Rule applied: {rule}")
             print(f"Detector:  {d_verdict} | confidence: {d_conf:.3f}")
             print(f"Reviewer:  {r_verdict} | confidence: {r_conf:.3f}")
-            print(f"Final:     {final_verdict} | confidence: {final_confidence:.3f}")
+            print(f"Rounds:    {current_round} | consensus: {state.get('consensus_reached', False)}")
+            print(f"Final:     {final_verdict} | confidence: {final_confidence:.3f} | weight_ratio: {weight_ratio:.3f}")
             print("=" * 80)
 
         return state
