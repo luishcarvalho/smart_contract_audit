@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Union
 
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import OllamaEmbeddings
 
 from smart_contract_audit_agents.config import EmbeddingConfig

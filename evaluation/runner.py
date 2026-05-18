@@ -21,7 +21,7 @@ import pandas as pd
 
 from smart_contract_audit_agents.config import Config
 from smart_contract_audit_agents.evaluation.metrics import Metrics, classify_pair
-from smart_contract_audit_agents.utils.display import banner, hr, print_llm_preview
+from smart_contract_audit_agents.utils.display import banner, hr, print_conversation_log, print_llm_preview
 from smart_contract_audit_agents.utils.io import safe_json_dumps
 
 
@@ -75,6 +75,9 @@ def analyze_pair(
     store_raw_response: bool = False,
     confidence_threshold: float = 0.7,
     debug: bool = False,
+    show_conversation: bool = False,
+    save_conversation: "str | None" = None,
+    show_prompts: bool = True,
 ) -> Dict[str, Any]:
     """Analyse one (contract, vulnerability) pair and return a result dict."""
     contract_idx  = example_data["index"]
@@ -101,6 +104,24 @@ def analyze_pair(
             max_chars=900,
             max_lines=14,
         )
+
+        conv_log = response.get("conversation_log", [])
+
+        if show_conversation:
+            print_conversation_log(
+                conv_log,
+                title=f"{contract_name}  │  {vulnerability_name}",
+                show_prompts=show_prompts,
+            )
+
+        if save_conversation and conv_log:
+            with open(save_conversation, "a", encoding="utf-8") as f:
+                print_conversation_log(
+                    conv_log,
+                    title=f"{contract_name}  │  {vulnerability_name}",
+                    show_prompts=show_prompts,
+                    file=f,
+                )
 
         elapsed = time.time() - start
         print(f"\nCompleted in {elapsed:.2f}s")
@@ -244,6 +265,9 @@ def run_evaluation(
     cfg: Config,
     output_dir: Optional[str] = None,
     debug: bool = False,
+    show_conversation: bool = False,
+    save_conversation: "str | None" = None,
+    show_prompts: bool = True,
 ) -> tuple[List[Dict], List[Dict], str]:
     """Run the full evaluation loop with incremental saving.
 
@@ -335,6 +359,9 @@ def run_evaluation(
                     store_raw_response=ecfg.store_raw_response,
                     confidence_threshold=ecfg.confidence_threshold,
                     debug=debug,
+                    show_conversation=show_conversation,
+                    save_conversation=save_conversation,
+                    show_prompts=show_prompts,
                 )
                 result["run"] = run
                 result["contract_position_in_run"] = contract_pos

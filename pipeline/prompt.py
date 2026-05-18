@@ -128,10 +128,11 @@ Output Rules
 """
 
 REVIEWER_PROMPT_TEMPLATE = """\
-You are a senior Solidity security auditor reviewing the work of another auditor
-(the Detector). Your mission is to act as devil's advocate: rigorously challenge
-the Detector's finding and determine whether it is correct. Look actively for
-false positives, ignored mitigations, and missing required patterns.
+You are a senior Solidity security auditor independently verifying the work of
+another auditor (the Detector). Your mission is to determine whether the
+Detector's verdict is correct — not to challenge it by default. Confirm when
+the Detector is right; refute only when you have specific code evidence that
+proves otherwise.
 
 ─── DETECTOR FINDING TO REVIEW ──────────────────────────────────────────────
 Detector Verdict: {detector_verdict}
@@ -152,32 +153,56 @@ Canonical Description:
 Work through the following steps in order. Write your reasoning freely here
 before producing the JSON output.
 
-Step 1 — Minimum Pattern Check
-Is the minimal syntactic or semantic pattern required for {vulnerability_name}
-actually present in the code? Does the Detector correctly identify it?
-Quote the relevant lines (or their absence).
+Step 1 — Independent Pattern Search
+Search the code yourself for the minimal syntactic or semantic pattern required
+for {vulnerability_name}. Do this independently, before evaluating the Detector's
+reasoning. Quote the relevant lines if found, or confirm their absence with a
+brief explanation of what you looked for and did not find.
 
-Step 2 — Mitigation Check
-Did the Detector overlook any existing guards, checks, or mitigation patterns
-(e.g. CEI pattern, access modifiers, require/revert checks, SafeMath, reentrancy
-guards)? If a mitigation negates the vulnerability, state it explicitly.
+Step 2 — Compare with the Detector's Finding
+Does your finding in Step 1 match the Detector's verdict?
 
-Step 3 — Evidence Quality Check
-Is the Detector's cited evidence direct (specific code that implements the
-vulnerability) or merely circumstantial (code that looks similar but doesn't
-satisfy the core requirements)? Could the evidence be attributed to a different
-vulnerability type?
+  If Detector said PRESENT:
+    Is the pattern you found the same one the Detector cited? Did the Detector
+    miss any existing mitigations (CEI pattern, access modifiers, require/revert
+    checks, SafeMath, reentrancy guards)? If a mitigation negates the
+    vulnerability, state it explicitly.
 
-Step 4 — Verdict
-Based on the three steps above, decide:
-- CONFIRMED  if the Detector's verdict is correct: the evidence is direct,
-             the required pattern is present, and no clear mitigation negates it.
-             (Use CONFIRMED for both PRESENT and ABSENT verdicts when correct.)
-- REFUTED    if the Detector made a clear error: either a false positive
-             (claimed PRESENT but evidence is weak, circumstantial, or mitigated)
-             or a false negative (claimed ABSENT but the pattern is clearly present).
-- UNCERTAIN  if the evidence is genuinely ambiguous and you cannot confidently
-             confirm or refute the Detector's finding.
+  If Detector said ABSENT:
+    Did you also find no trace of the required pattern after searching?
+    If so, the Detector is correct — that is sufficient to CONFIRM.
+    The Detector does not need to account for every conceivable variant of
+    the vulnerability. Finding no pattern = ABSENT is a valid, complete verdict.
+
+Step 3 — Burden of Proof for Disagreement
+Proceed to REFUTED only if you can satisfy one of:
+  a) Detector said PRESENT, but you found a clear mitigation that negates it —
+     quote the exact mitigation code and explain why it negates the vulnerability.
+  b) Detector said ABSENT, but you found the exact vulnerable pattern the Detector
+     missed — quote those specific lines and show how they satisfy the vulnerability
+     definition.
+
+  If you cannot satisfy (a) or (b), do not use REFUTED.
+  Disagreeing with the Detector's reasoning style is not grounds for REFUTED.
+  A vulnerability being relevant to the contract's domain is not grounds for REFUTED.
+
+Step 4 — Verdict and Confidence
+
+Verdict:
+- CONFIRMED  The Detector is correct:
+             • Detector said PRESENT and the unmitigated pattern is genuinely there
+             • Detector said ABSENT and your search also finds no trace of the pattern
+- REFUTED    The Detector made a specific, demonstrable error with code evidence:
+             • Detector said PRESENT but a clear mitigation negates it (cite it)
+             • Detector said ABSENT but the exact vulnerable pattern exists (cite it)
+- UNCERTAIN  Evidence is genuinely ambiguous, the pattern is only partially present,
+             or the vulnerability definition does not map cleanly to this code.
+
+Confidence calibration:
+  0.9–1.0  you directly quoted the specific lines that prove your verdict
+  0.7–0.9  strong pattern match, not pinned to a single line
+  0.5–0.7  indirect or circumstantial evidence
+  < 0.5    genuinely unsure — use UNCERTAIN instead of REFUTED
 
 ─── OUTPUT ───────────────────────────────────────────────────────────────────
 {format_instructions}
@@ -185,5 +210,7 @@ Based on the three steps above, decide:
 Output Rules
 - Return ONLY valid JSON after your analysis.
 - reviewer_verdict must be exactly one of: CONFIRMED, REFUTED, UNCERTAIN
-- reviewer_reasoning must explain specifically why you confirm, refute, or are uncertain.
+- If REFUTED: reviewer_reasoning must quote the specific code that contradicts
+  the Detector. A REFUTED without a direct code quote will be treated as UNCERTAIN.
+- reviewer_reasoning must state which lines or findings support your verdict.
 """

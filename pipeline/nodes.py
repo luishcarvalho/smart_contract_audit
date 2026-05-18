@@ -257,6 +257,16 @@ def make_detector_node(
         state["detector_reasoning"] = summary
         state["detector_issues"] = [i if isinstance(i, dict) else {} for i in issues]
 
+        # Log the full prompt + response for conversation analysis
+        conv_log = list(state.get("conversation_log", []))
+        conv_log.append({
+            "round": state.get("current_round", 1),
+            "agent": "detector",
+            "prompt": prompt,
+            "response": raw_response,
+        })
+        state["conversation_log"] = conv_log
+
         # Append a new entry to debate_history; reviewer fields filled later by reviewer_node
         existing_history = list(state.get("debate_history", []))
         existing_history.append({
@@ -378,6 +388,16 @@ def make_reviewer_node(
         state["reviewer_confidence"] = float(reviewer_data.get("reviewer_confidence", 0.0))
         state["reviewer_reasoning"] = str(reviewer_data.get("reviewer_reasoning", ""))
 
+        # Log the full prompt + response for conversation analysis
+        conv_log = list(state.get("conversation_log", []))
+        conv_log.append({
+            "round": state.get("current_round", 1),
+            "agent": "reviewer",
+            "prompt": prompt,
+            "response": raw_response,
+        })
+        state["conversation_log"] = conv_log
+
         # Update the last debate_history entry with Reviewer results
         updated_history = list(state.get("debate_history", []))
         if updated_history:
@@ -409,10 +429,19 @@ def feedback_node(state: RAGState) -> dict:
         "Please reconsider your analysis taking into account the reviewer's objection above. "
         "Focus especially on any points where your evidence may be insufficient or misidentified."
     )
+    conv_log = list(state.get("conversation_log", []))
+    conv_log.append({
+        "round": state["current_round"],
+        "agent": "feedback",
+        "prompt": None,
+        "response": feedback,
+    })
+
     return {
         "reviewer_feedback": feedback,
         "current_round": state["current_round"] + 1,
         "debate_history": state["debate_history"],
+        "conversation_log": conv_log,
     }
 
 

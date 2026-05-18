@@ -191,6 +191,7 @@ class AuditPipeline:
             consensus_reached=False,
             debate_history=[],
             reviewer_feedback="",
+            conversation_log=[],
         )
 
         final_state = self.workflow.invoke(initial_state)
@@ -231,6 +232,7 @@ class AuditPipeline:
             "debate_history": debate_history,
             "reconciliation_weight_ratio": final_state.get("reconciliation_weight_ratio", 0.0),
             "detector_confidence_delta": detector_confidence_delta,
+            "conversation_log": final_state.get("conversation_log", []),
         }
 
     # Alias kept for compatibility

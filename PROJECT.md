@@ -4,7 +4,7 @@
 
 Este projeto implementa um **pipeline de auditoria de segurança de smart contracts baseado em LLMs**, usando uma arquitetura de **debate iterativo entre dois agentes** (Detector + Reviewer) orquestrada com [LangGraph](https://github.com/langchain-ai/langgraph). O pipeline analisa contratos Solidity em busca de vulnerabilidades conhecidas, compara os resultados com um ground truth e calcula métricas de classificação binária (TP, FP, TN, FN, Precision, Recall, F1, Accuracy).
 
-O Detector identifica vulnerabilidades ativamente; o Reviewer as desafia como advogado do diabo. Quando o Reviewer não confirma o veredicto do Detector (`REFUTED` ou `UNCERTAIN`), um **nó de feedback determinístico** sintetiza a objeção e a devolve ao Detector para reavaliação na próxima rodada. Esse ciclo se repete até que os agentes cheguem a consenso ou o limite de rodadas (`max_rounds`) seja atingido. Em caso de **impasse**, o Reconciler atua como árbitro usando **arbitragem ponderada por confiança calibrada**, inspirada no ReConcile (Chen et al., ACL 2024).
+O Detector identifica vulnerabilidades ativamente; o Reviewer verifica de forma independente se o veredicto está correto. Quando o Reviewer não confirma o veredicto do Detector (`REFUTED` ou `UNCERTAIN`), um **nó de feedback determinístico** sintetiza a objeção e a devolve ao Detector para reavaliação na próxima rodada. Esse ciclo se repete até que os agentes cheguem a consenso ou o limite de rodadas (`max_rounds`) seja atingido. Em caso de **impasse**, o Reconciler atua como árbitro usando **arbitragem ponderada por confiança calibrada**, inspirada no ReConcile (Chen et al., ACL 2024).
 
 O modelo de linguagem é executado **localmente via [Ollama](https://ollama.com/)** (padrão: `gemma3:27b`). O contexto de referência sobre vulnerabilidades vem do catálogo **OWASP Smart Contract Weakness Enumeration (SCWE)**.
 
@@ -115,12 +115,14 @@ Config(
 | LLM | `max_retries` | `3` | Tentativas em caso de crash |
 | Embedding | `use_fast` | `True` | `True`=MiniLM (CPU); `False`=starcoder2:3b (Ollama) |
 | Retrieval | `use_rag` | `True` | Habilita/desabilita RAG |
-| Retrieval | `top_k` | `7` | Documentos recuperados por query |
+| Retrieval | `top_k` | `3` | Documentos recuperados por query |
 | Retrieval | `use_hybrid` | `True` | Filtro por categoria + fallback semântico |
 | Agent | `use_reviewer` | `True` | Dual-agent (True) ou single-agent (False) |
 | Agent | `max_rounds` | `3` | Máximo de rodadas de debate antes da arbitragem |
 | Eval | `confidence_threshold` | `0.7` | Confiança mínima para classificar como PRESENT |
 | Data | `owasp_registry_path` | `.../owasp_scwe.csv` | Catálogo OWASP SCWE |
+| Data | `use_test_subset` | `False` | `True` = avalia apenas `test_subset_size` contratos (toggle rápido) |
+| Data | `test_subset_size` | `5` | Contratos a avaliar quando `use_test_subset=True` |
 
 ---
 
@@ -202,6 +204,11 @@ RAGState:
   final_confidence             # confiança reconciliada (arredondada a 4 casas)
   reconciliation_rule          # "consensus_round_N" | "weighted_arbitration_round_N" | "rule_0_detector_only"
   reconciliation_weight_ratio  # ratio do peso dominante na arbitragem ponderada (0.0 quando consenso)
+
+  # Transcrição completa da conversa (sempre coletada; impressa com --conversation)
+  conversation_log             # [{round, agent, prompt, response}, ...]
+                               #   agent = "detector" | "reviewer" | "feedback"
+                               #   prompt = None para o nó feedback (sem LLM)
 ```
 
 **Quem escreve o quê:**
@@ -244,17 +251,17 @@ O agente Detector. Executa **uma chamada LLM por rodada** e pode ser invocado m�
 
 ### `reviewer_node`
 
-O agente Reviewer. Atua como **advogado do diabo** — desafia o Detector. Não usa RAG; usa apenas descrição canônica e OWASP SCWE como referência. Recebe:
+O agente Reviewer. Verifica de forma **independente** se o veredicto do Detector está correto — não desafia por padrão. Não usa RAG; usa apenas descrição canônica e OWASP SCWE como referência. Recebe:
 - Veredicto e raciocínio do Detector (da última rodada)
 - Descrição canônica da vulnerabilidade
 - Bloco OWASP SCWE
 - Código do contrato
 
 Segue 4 passos de revisão:
-1. Confirma se o padrão mínimo está de facto presente
-2. Verifica mitigações ignoradas pelo Detector
-3. Avalia qualidade das evidências (diretas vs. circunstanciais)
-4. Emite: `CONFIRMED`, `REFUTED` ou `UNCERTAIN`
+1. Busca independente do padrão mínimo (antes de ler o raciocínio do Detector)
+2. Compara o resultado com o veredicto do Detector — para ABSENT, encontrar o mesmo vazio é suficiente para CONFIRMED
+3. Ônus da prova: REFUTED só é válido se o Reviewer puder citar código específico que contradiz o Detector
+4. Emite: `CONFIRMED`, `REFUTED` ou `UNCERTAIN`, com calibração de confiança explícita
 
 **Após o LLM responder:**
 - Atualiza o **último entry** do `debate_history` com `reviewer_verdict` e `reviewer_confidence`.
@@ -401,6 +408,15 @@ Contém:
 
 O Reviewer **não recebe** o `reviewer_feedback` — ele vê apenas o veredicto mais recente do Detector, não o histórico do debate.
 
+**Estrutura dos 4 passos do Reviewer:**
+
+1. **Independent Pattern Search** — busca o padrão mínimo de forma independente antes de ler o raciocínio do Detector; cita as linhas relevantes ou confirma a ausência explicitamente.
+2. **Compare with Detector's Finding** — verifica se o resultado da busca corresponde ao veredicto do Detector. Para veredictos ABSENT: concordar com a ausência é suficiente para CONFIRMED — o Detector não precisa justificar cada variante possível.
+3. **Burden of Proof for Disagreement** — REFUTED só é válido ao satisfazer um de dois critérios: (a) Detector disse PRESENT mas existe mitigação clara não citada, ou (b) Detector disse ABSENT mas o padrão vulnerável exato existe no código. Sem citação de código, REFUTED é inválido.
+4. **Verdict and Confidence** — emite o veredicto com calibração explícita: 0.9–1.0 apenas com linha específica citada; 0.7–0.9 para correspondência de padrão; 0.5–0.7 para evidência indireta; <0.5 recomenda UNCERTAIN.
+
+**Semântica de CONFIRMED para veredictos ABSENT:** `CONFIRMED` significa que o Reviewer concorda com o Detector — independentemente da direção. `CONFIRMED` + ABSENT = "a vulnerabilidade está corretamente identificada como ausente". Esta distinção é crítica: o Reviewer não precisa encontrar evidência positiva para confirmar um ABSENT.
+
 ---
 
 ## Lookup do Catálogo OWASP — `utils/owasp_lookup.py`
@@ -521,11 +537,25 @@ python run.py --model deepseek-r1:14b --temperature 0.0
 # Definir número máximo de rodadas de debate (padrão: 3)
 python run.py --max-rounds 5
 
-# Testar em subconjunto de N contratos
+# Testar em subconjunto de N contratos via CLI
 python run.py --subset 10
 
-# Modo debug: imprime prompts completos
+# Testar em subconjunto rápido via config (use_test_subset=True em config.py)
+# Equivalente a --subset 5 quando use_test_subset=True e test_subset_size=5
+python run.py
+
+# Modo debug: imprime prompts completos durante a execução
 python run.py --subset 1 --debug
+
+# Imprimir transcrição completa Detector↔Reviewer no terminal após cada par
+python run.py --subset 1 --conversation
+
+# Salvar transcrição em arquivo separado (pipeline continua no terminal normalmente)
+python run.py --subset 1 --save-conversation conversa.txt
+
+# Ocultar prompts na transcrição (mostra apenas respostas e feedbacks)
+python run.py --subset 1 --conversation --no-prompts
+python run.py --subset 1 --save-conversation conversa.txt --no-prompts
 
 # Múltiplas runs para medir variância
 python run.py --runs 3
@@ -542,7 +572,7 @@ python run.py --resume-dir results/gemma3-27b/05-2026/rag_10-05-26_12-00-00
 |---|---|
 | `langchain-ollama` | Interface com o servidor Ollama (LLM + embeddings) |
 | `langchain-chroma` | Vectorstore ChromaDB |
-| `langchain-community` | HuggingFace embeddings (MiniLM) |
+| `langchain-huggingface` | HuggingFace embeddings (MiniLM) |
 | `langchain-core` | Documentos, mensagens, parsers Pydantic |
 | `langgraph` | Orquestração do grafo de agentes (inclui suporte a loops cíclicos) |
 | `pydantic` | Schemas de saída do LLM (parsing JSON) |

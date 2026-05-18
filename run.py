@@ -91,7 +91,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train",   default=_data.train_path)
     p.add_argument("--test",    default=_data.test_path)
     p.add_argument("--vulns",   default=_data.vuln_desc_path)
-    p.add_argument("--subset",  type=int, default=_data.test_subset_size,   help="Max contracts to evaluate (0=all)")
+    p.add_argument("--subset",  type=int, default=0,
+                                     help="Max contracts to evaluate (0=use config/all)")
 
     # Eval
     p.add_argument("--runs",             type=int, default=_ev.n_runs)
@@ -103,6 +104,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume-dir",       default=None,              help="Path to an existing results dir to resume")
     p.add_argument("--store-raw",        action="store_true",       help="Store raw LLM responses in CSV")
     p.add_argument("--debug",            action="store_true",       help="Print full prompts for each LLM call")
+    p.add_argument("--conversation",     action="store_true",       help="Print full Detector↔Reviewer conversation after each pair")
+    p.add_argument("--save-conversation", default=None, metavar="FILE",
+                                         help="Write conversation log to FILE (one entry per pair, appended)")
+    p.add_argument("--no-prompts",       action="store_true",       help="With --conversation/--save-conversation: hide prompts, show only LLM responses")
 
     return p.parse_args()
 
@@ -148,7 +153,7 @@ def main() -> None:
             train_path=args.train,
             test_path=args.test,
             vuln_desc_path=args.vulns,
-            test_subset_size=args.subset,
+            # test_subset_size and use_test_subset come from config.py defaults
         ),
     )
 
@@ -164,6 +169,18 @@ def main() -> None:
     print(f"Max rounds:  {cfg.agent.max_rounds if use_reviewer else 'N/A (single-agent)'}")
     print(f"Runs:        {cfg.eval.n_runs}")
 
+    # ── Resolve effective subset size ─────────────────────────────────────────
+    # Priority: --subset CLI > use_test_subset config toggle > full dataset
+    if args.subset > 0:
+        effective_subset = args.subset
+    elif cfg.data.use_test_subset:
+        effective_subset = cfg.data.test_subset_size
+    else:
+        effective_subset = 0  # full dataset
+
+    subset_label = f"{effective_subset} contracts (quick test)" if effective_subset > 0 else "full dataset"
+    print(f"Dataset:     {subset_label}")
+
     # ── Load datasets ─────────────────────────────────────────────────────────
     banner("Loading datasets")
     test_df = pd.read_csv(cfg.data.test_path)
@@ -175,7 +192,7 @@ def main() -> None:
     print(f"Vulnerability types: {len(vuln_desc_df)}")
 
     # ── Prepare selected examples ─────────────────────────────────────────────
-    subset = test_df if cfg.data.test_subset_size == 0 else test_df.iloc[: cfg.data.test_subset_size]
+    subset = test_df if effective_subset == 0 else test_df.iloc[:effective_subset]
     selected_examples = [
         {
             "name": f"{row['vulnerability']} Example {idx}",
@@ -244,6 +261,9 @@ def main() -> None:
         cfg=cfg,
         output_dir=args.resume_dir,
         debug=args.debug,
+        show_conversation=args.conversation,
+        save_conversation=args.save_conversation,
+        show_prompts=not args.no_prompts,
     )
     total_time_seconds = _time.time() - _eval_start
 

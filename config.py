@@ -49,7 +49,7 @@ class EmbeddingConfig:
 @dataclass
 class RetrievalConfig:
     use_rag: bool = True        # True = RAG pipeline; False = direct LLM
-    top_k: int = 7
+    top_k: int = 3
     use_hybrid: bool = True     # True = category filter + semantic fallback; False = semantic only
     vuln_metadata_field: str = "vulnerability"  # ChromaDB metadata key for vulnerability category
 
@@ -96,7 +96,8 @@ class DataConfig:
     test_path: str = "/home/luis.carvalho/gervais_dataset.csv"
     vuln_desc_path: str = "/home/luis.carvalho/vulnerabilities_description.csv"
     owasp_registry_path: str = "/home/luis.carvalho/owasp_scwe.csv"
-    test_subset_size: int = 0    # 0 = use full test set
+    test_subset_size: int = 5    # contracts to evaluate when use_test_subset=True
+    use_test_subset: bool = False  # set to True for quick testing (overridden by --subset N)
 
 
 # ─────────────────────────────────────────────

@@ -86,3 +86,6 @@ class RAGState(TypedDict):
 
     # Arbitration metrics (set by reconcile_node)
     reconciliation_weight_ratio: float  # dominant weight ratio in weighted arbitration; 0.0 on consensus
+
+    # Full conversation transcript (always collected; printed with --conversation)
+    conversation_log: list  # [{round, agent, prompt, response}, ...]

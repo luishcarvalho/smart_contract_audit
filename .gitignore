@@ -20,3 +20,7 @@ env/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Logs
+conversa.txt
+conversa2.txt

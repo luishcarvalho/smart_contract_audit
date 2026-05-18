@@ -70,6 +70,73 @@ def _format_preview(text: str, *, max_chars: int = 700, max_lines: int = 12) -> 
     return preview
 
 
+def print_conversation_log(
+    log: list,
+    *,
+    title: str = "",
+    show_prompts: bool = True,
+    file=None,
+) -> None:
+    """Print the full Detector ↔ Reviewer conversation transcript.
+
+    Each entry in *log* has keys: round, agent, prompt, response.
+    Set show_prompts=False to skip the (often long) prompt sections.
+    Pass file=<open file object> to write to a file instead of stdout.
+    """
+    import sys
+    out = file if file is not None else sys.stdout
+
+    def p(*args, **kwargs):
+        print(*args, file=out, **kwargs)
+
+    AGENT_LABELS = {
+        "detector": "DETECTOR",
+        "reviewer": "REVIEWER",
+        "feedback": "FEEDBACK  (deterministic — no LLM)",
+    }
+    W = 88
+
+    p("\n" + "█" * W)
+    header = f"  CONVERSATION LOG{('  │  ' + title) if title else ''}"
+    p(header)
+    p("█" * W)
+
+    if not log:
+        p("  (no conversation recorded)")
+        p("█" * W)
+        return
+
+    for entry in log:
+        round_n  = entry.get("round", "?")
+        agent    = entry.get("agent", "?")
+        label    = AGENT_LABELS.get(agent, agent.upper())
+        prompt   = entry.get("prompt") or ""
+        response = entry.get("response") or ""
+
+        section = f"  ROUND {round_n}  ·  {label}  "
+        pad     = max(W - len(section) - 2, 0)
+        p(f"\n{'─' * 2}{section}{'─' * pad}")
+
+        if agent == "feedback":
+            p("\n[FEEDBACK INJECTED INTO NEXT DETECTOR PROMPT]\n")
+            for line in response.splitlines():
+                p(f"  {line}")
+        else:
+            if show_prompts and prompt:
+                p("\n── PROMPT " + "─" * (W - 10))
+                for line in prompt.splitlines():
+                    p(f"  {line}")
+
+            p("\n── RESPONSE " + "─" * (W - 12))
+            if response:
+                for line in response.splitlines():
+                    p(f"  {line}")
+            else:
+                p("  (empty response)")
+
+    p("\n" + "█" * W + "\n")
+
+
 def print_llm_preview(
     response: Dict[str, Any],
     *,
