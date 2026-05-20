@@ -127,14 +127,41 @@ def make_retrieve_node(
 
 def generate_context_node(state: RAGState) -> RAGState:
     """Format retrieved documents into a context string."""
-    if state["documents"]:
-        parts = []
-        for i, doc in enumerate(state["documents"], 1):
-            vuln = doc.metadata.get("vulnerability", "unknown")
-            parts.append(f"Example {i} ({vuln}):\n{doc.page_content[:500]}...")
-        state["context"] = "\n\n".join(parts)
-    else:
+    if not state["documents"]:
         state["context"] = "No relevant examples found."
+        return state
+
+    retrieval_mode = state.get("retrieval_mode", "semantic_only")
+    vuln_name = state.get("vulnerability_name", "")
+
+    if retrieval_mode == "category_only":
+        header = (
+            f"Retrieved Examples — same vulnerability ({vuln_name})\n"
+            "These are known instances of this exact vulnerability pattern. "
+            "Use them only to calibrate what the pattern looks like in code. "
+            "Do NOT mark PRESENT solely because the contract resembles these examples."
+        )
+    elif retrieval_mode == "hybrid":
+        header = (
+            f"Retrieved Examples — mixed (some match {vuln_name}, others are structurally similar)\n"
+            "The first examples match this vulnerability specifically; the remaining ones are "
+            "structurally similar but may involve different vulnerability types. "
+            "Use all of them only to calibrate code patterns — NOT as evidence of presence."
+        )
+    else:  # semantic_only fallback
+        header = (
+            f"Retrieved Examples — structurally similar (no exact match for {vuln_name})\n"
+            "These examples were retrieved by semantic similarity and may involve different "
+            "vulnerability types. Use them only to calibrate general code patterns. "
+            "Do NOT treat similarity to these examples as evidence that this vulnerability is present."
+        )
+
+    parts = []
+    for i, doc in enumerate(state["documents"], 1):
+        vuln = doc.metadata.get("vulnerability", "unknown")
+        parts.append(f"Example {i} ({vuln}):\n{doc.page_content[:500]}...")
+
+    state["context"] = header + "\n\n" + "\n\n".join(parts)
     return state
 
 
@@ -159,7 +186,7 @@ def make_detector_node(
     def detector_node(state: RAGState) -> RAGState:
         code = _truncate_code(state["query"], max_code_chars)
         owasp_raw = state.get("owasp_context", "")
-        swc_section = (
+        owasp_section = (
             "OWASP SCWE Reference\n"
             "Authoritative definition and known fix pattern from the OWASP Smart Contract "
             "Weakness Enumeration. Use it to calibrate the exact vulnerability "
@@ -177,7 +204,7 @@ def make_detector_node(
             vulnerability_name=state["vulnerability_name"],
             vulnerability_description=state["vulnerability_description"],
             format_instructions=_detector_parser.get_format_instructions(),
-            swc_section=swc_section,
+            owasp_section=owasp_section,
             reviewer_feedback=reviewer_feedback_block,
         )
         if use_rag:
@@ -302,7 +329,7 @@ def make_reviewer_node(
         # Reviewer sees the same truncated code as the Detector
         code = _truncate_code(state["query"], max_code_chars)
         owasp_raw = state.get("owasp_context", "")
-        swc_section = (
+        owasp_section = (
             "OWASP SCWE Reference\n"
             "Authoritative definition and known fix pattern from the OWASP Smart Contract "
             "Weakness Enumeration.\n\n"
@@ -319,7 +346,7 @@ def make_reviewer_node(
             detector_reasoning=detector_reasoning,
             vulnerability_name=state["vulnerability_name"],
             vuln_canonical_description=state.get("vuln_canonical_description", state["vulnerability_description"]),
-            swc_section=swc_section,
+            owasp_section=owasp_section,
             query=code,
             format_instructions=_reviewer_parser.get_format_instructions(),
         )
@@ -489,29 +516,26 @@ def make_reconcile_node(cfg: "Config"):
             rule = f"consensus_round_{current_round}"
             weight_ratio = 0.0
         else:
-            # Impasse after max_rounds: calibrated confidence-weighted arbitration.
-            # Temperature < 1 softens overconfidence by compressing the weight distribution.
-            TEMPERATURE = 0.7
-            if d_verdict == "PRESENT":
-                w_present = d_conf ** (1 / TEMPERATURE)
-                w_absent = r_conf ** (1 / TEMPERATURE)
-            else:
-                w_absent = d_conf ** (1 / TEMPERATURE)
-                w_present = r_conf ** (1 / TEMPERATURE)
+            # Caminho 2 — Impasse: Reviewer nunca confirmou após max_rounds
+            # Decisão baseada no último veredicto do Reviewer:
+            #   REFUTED   → Reviewer apresentou evidência de erro → Reviewer vence
+            #   UNCERTAIN → Reviewer admitiu dúvida → Detector prevalece
 
-            total = w_present + w_absent
-            if total == 0:
-                ratio_present = 0.5
-                final_confidence = 0.0
-                final_verdict = "ABSENT"
-                weight_ratio = 0.0
-            else:
-                ratio_present = w_present / total
-                final_confidence = max(w_present, w_absent) / total
-                final_verdict = "PRESENT" if ratio_present > 0.5 else "ABSENT"
-                weight_ratio = round(max(w_present, w_absent) / total, 4)
+            r_verdict = state.get("reviewer_verdict", "UNCERTAIN")
 
-            rule = f"weighted_arbitration_round_{current_round}"
+            if r_verdict == "REFUTED":
+                # Reviewer vence: veredicto final é o oposto do Detector
+                final_verdict = "ABSENT" if d_verdict == "PRESENT" else "PRESENT"
+                final_confidence = round(r_conf, 4)
+                rule = f"reviewer_authority_refuted_round_{current_round}"
+
+            else:  # UNCERTAIN
+                # Detector prevalece: penalidade de 10% por impasse não resolvido
+                final_verdict = d_verdict
+                final_confidence = round(max(d_conf - 0.10, 0.1), 4)
+                rule = f"detector_prevails_uncertain_round_{current_round}"
+
+            weight_ratio = 0.0
 
         state["final_verdict"] = final_verdict
         state["final_confidence"] = round(final_confidence, 4)

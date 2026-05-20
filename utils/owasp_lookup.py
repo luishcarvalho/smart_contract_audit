@@ -27,7 +27,9 @@ _ALIASES: Dict[str, List[str]] = {
     "reentrancy":                                        ["reentrancy attacks"],
     "access control":                                    ["insufficient authorization checks"],
     "code with no effects":                              ["dead code"],
-    "on-chain oracle manipulation":                      ["price oracle manipulation"],
+    "function default visibility":                        ["missing explicit function visibility"],
+    "onchain oracle manipulation":                        ["price oracle manipulation"],
+    "unfair slippage protection":                        ["missing slippage protection in automated token swaps"],
     "unexpected ether balance":                          ["incorrect ether balance tracking"],
     "transaction order dependence":                      ["transaction order dependence"],
 }
@@ -75,6 +77,14 @@ class OWASPLookup:
                 return r
 
         return []
+
+    def lookup_description(self, vulnerability_name: str) -> str:
+        """Return the OWASP SCWE description for *vulnerability_name*, or '' if no match."""
+        rows = self._find_rows(_norm(vulnerability_name))
+        if not rows:
+            return ""
+        desc = str(rows[0].get("description", "")).strip()
+        return desc if desc and desc != "nan" else ""
 
     def lookup_formatted(self, vulnerability_name: str) -> str:
         """Return a formatted OWASP SCWE reference block, or '' if no match found."""

@@ -17,14 +17,12 @@ Target Vulnerability
 - Name: {vulnerability_name}
 - Description: {vulnerability_description}
 
-{swc_section}
-Retrieved Examples (pattern hints only — NOT evidence)
-The examples below show known instances of this vulnerability pattern.
-Use them only to calibrate what the pattern looks like in code.
-Do NOT mark PRESENT solely because the contract resembles these examples.
-
 {context}
-{reviewer_feedback}Smart Contract Code
+
+
+{reviewer_feedback}
+
+Smart Contract Code
 {query}
 
 ─── DETECTION ANALYSIS (think before you decide) ────────────────────────────
@@ -59,6 +57,13 @@ Based on the three steps above, decide:
            evidence is indirect and applies more accurately to a different
            vulnerability type.
 
+Confidence calibration:
+- >= 0.8 : high certainty — direct evidence found (PRESENT) or absence explicitly
+           verified in code (ABSENT)
+- 0.6–0.79: moderate confidence — pattern identified but with ambiguity
+- 0.4–0.59: low confidence — indirect or incomplete evidence
+- < 0.4  : genuinely uncertain; prefer returning issues=[] rather than forcing a verdict
+
 ─── OUTPUT ───────────────────────────────────────────────────────────────────
 {format_instructions}
 
@@ -69,6 +74,8 @@ Output Rules
                include line numbers, and include copied code snippets as evidence.
 - Do NOT report vulnerabilities other than {vulnerability_name}.
 """
+
+#--------------------------------------------------------------------------------------------------------
 
 DETECTOR_DIRECT_PROMPT_TEMPLATE = """\
 You are a specialized Solidity vulnerability DETECTOR. Your sole mission is to
@@ -80,8 +87,9 @@ Target Vulnerability
 - Name: {vulnerability_name}
 - Description: {vulnerability_description}
 
-{swc_section}
-{reviewer_feedback}Smart Contract Code
+{reviewer_feedback}
+
+Smart Contract Code
 {query}
 
 ─── DETECTION ANALYSIS (think before you decide) ────────────────────────────
@@ -116,6 +124,13 @@ Based on the three steps above, decide:
            evidence is indirect and applies more accurately to a different
            vulnerability type.
 
+Confidence calibration:
+- >= 0.8 : high certainty — direct evidence found (PRESENT) or absence explicitly
+           verified in code (ABSENT)
+- 0.6–0.79: moderate confidence — pattern identified but with ambiguity
+- 0.4–0.59: low confidence — indirect or incomplete evidence
+- < 0.4  : genuinely uncertain; prefer returning issues=[] rather than forcing a verdict
+
 ─── OUTPUT ───────────────────────────────────────────────────────────────────
 {format_instructions}
 
@@ -126,6 +141,8 @@ Output Rules
                include line numbers, and include copied code snippets as evidence.
 - Do NOT report vulnerabilities other than {vulnerability_name}.
 """
+
+#--------------------------------------------------------------------------------------------------------
 
 REVIEWER_PROMPT_TEMPLATE = """\
 You are a senior Solidity security auditor independently verifying the work of
@@ -145,7 +162,7 @@ Vulnerability Name: {vulnerability_name}
 Canonical Description:
 {vuln_canonical_description}
 
-{swc_section}
+{owasp_section}
 ─── SMART CONTRACT CODE ──────────────────────────────────────────────────────
 {query}
 

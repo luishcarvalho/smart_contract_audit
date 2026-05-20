@@ -151,9 +151,16 @@ class AuditPipeline:
         if self.owasp_lookup is not None:
             owasp_context = self.owasp_lookup.lookup_formatted(vulnerability_name) or ""
 
+        # Priority: OWASP description → secondary CSV (with caveat) → param
         vuln_canonical_description = ""
-        if self.vuln_desc_lookup is not None:
-            vuln_canonical_description = self.vuln_desc_lookup.lookup(vulnerability_name) or ""
+        if self.owasp_lookup is not None:
+            vuln_canonical_description = self.owasp_lookup.lookup_description(vulnerability_name) or ""
+        if not vuln_canonical_description and self.vuln_desc_lookup is not None:
+            fallback = self.vuln_desc_lookup.lookup(vulnerability_name) or ""
+            if fallback:
+                vuln_canonical_description = (
+                    "[Note: description from secondary source — may be outdated]\n" + fallback
+                )
         if not vuln_canonical_description:
             vuln_canonical_description = vulnerability_description
 
