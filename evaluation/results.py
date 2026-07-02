@@ -215,7 +215,6 @@ def save_results(
 | Resume contract index | `{cfg.eval.resume_contract_index}` |
 | Resume vuln position | `{cfg.eval.resume_vuln_pos}` |
 | Store raw responses | `{cfg.eval.store_raw_response}` |
-| Confidence threshold | `{cfg.eval.confidence_threshold}` |
 
 ### Data
 

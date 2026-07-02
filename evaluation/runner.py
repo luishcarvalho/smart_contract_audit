@@ -73,7 +73,6 @@ def analyze_pair(
     vulnerability_description: str,
     *,
     store_raw_response: bool = False,
-    confidence_threshold: float = 0.7,
     debug: bool = False,
     show_conversation: bool = False,
     save_conversation: "str | None" = None,
@@ -156,8 +155,8 @@ def analyze_pair(
         # Issues always come from the Detector
         detector_issues = analysis.get("issues", []) or []
 
-        # Prediction: based on final_verdict and final_confidence threshold
-        is_predicted_positive = (final_verdict == "PRESENT") and (final_confidence >= confidence_threshold)
+        # Prediction: verdict from the Reconciler is the final decision
+        is_predicted_positive = (final_verdict == "PRESENT")
         predicted_vulns = [vulnerability_name] if is_predicted_positive else []
 
         print(
@@ -165,7 +164,7 @@ def analyze_pair(
             f"Reviewer: {reviewer_verdict} ({reviewer_confidence:.2f}) | "
             f"Final: {final_verdict} ({final_confidence:.2f}) via {reconciliation_rule}"
         )
-        print(f"Issues found: {len(detector_issues)} | threshold: {confidence_threshold:.2f}")
+        print(f"Issues found: {len(detector_issues)}")
         for i, issue in enumerate(detector_issues[:5], 1):
             print(f"  {i}. [{issue.get('severity','?')}] {issue.get('description','')[:160]}")
         if len(detector_issues) > 5:
@@ -357,7 +356,6 @@ def run_evaluation(
                     vuln_name,
                     vuln_desc,
                     store_raw_response=ecfg.store_raw_response,
-                    confidence_threshold=ecfg.confidence_threshold,
                     debug=debug,
                     show_conversation=show_conversation,
                     save_conversation=save_conversation,

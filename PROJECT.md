@@ -119,7 +119,6 @@ Config(
 | Retrieval | `use_hybrid` | `True` | Filtro por categoria + fallback semântico |
 | Agent | `use_reviewer` | `True` | Dual-agent (True) ou single-agent (False) |
 | Agent | `max_rounds` | `3` | Máximo de rodadas de debate antes da arbitragem |
-| Eval | `confidence_threshold` | `0.7` | Confiança mínima para classificar como PRESENT |
 | Data | `owasp_registry_path` | `.../owasp_scwe.csv` | Catálogo OWASP SCWE |
 | Data | `use_test_subset` | `False` | `True` = avalia apenas `test_subset_size` contratos (toggle rápido) |
 | Data | `test_subset_size` | `5` | Contratos a avaliar quando `use_test_subset=True` |

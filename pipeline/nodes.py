@@ -509,9 +509,7 @@ def make_reconcile_node(cfg: "Config"):
         current_round = state.get("current_round", 1)
 
         if state.get("consensus_reached", False):
-            # Consensus: penalize confidence for late rounds (earlier agreement = higher certainty)
-            rounds_penalty = (current_round - 1) * 0.05
-            final_confidence = max(d_conf - rounds_penalty, 0.1)
+            final_confidence = d_conf
             final_verdict = d_verdict
             rule = f"consensus_round_{current_round}"
             weight_ratio = 0.0
@@ -530,9 +528,9 @@ def make_reconcile_node(cfg: "Config"):
                 rule = f"reviewer_authority_refuted_round_{current_round}"
 
             else:  # UNCERTAIN
-                # Detector prevalece: penalidade de 10% por impasse não resolvido
+                # Detector prevalece: Reviewer admitiu dúvida insuficiente para refutar
                 final_verdict = d_verdict
-                final_confidence = round(max(d_conf - 0.10, 0.1), 4)
+                final_confidence = d_conf
                 rule = f"detector_prevails_uncertain_round_{current_round}"
 
             weight_ratio = 0.0

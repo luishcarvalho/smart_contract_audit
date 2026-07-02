@@ -80,8 +80,6 @@ class EvalConfig:
     # Skip a specific contract index
     skip_contract: bool = False
     skip_contract_index: int = -1
-    # Confidence threshold: pairs where final_confidence < this are treated as ABSENT
-    confidence_threshold: float = 0.7
     # Output
     results_dir: str = "results"
     store_raw_response: bool = False
