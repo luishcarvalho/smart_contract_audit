@@ -47,6 +47,7 @@ from smart_contract_audit_agents.config import (
     EvalConfig,
     LLMConfig,
     RetrievalConfig,
+    TriageConfig,
 )
 from smart_contract_audit_agents.evaluation.results import save_results
 from smart_contract_audit_agents.evaluation.runner import run_evaluation
@@ -62,9 +63,10 @@ def parse_args() -> argparse.Namespace:
     _llm   = DEFAULT_CONFIG.llm
     _ret   = DEFAULT_CONFIG.retrieval
     _emb   = DEFAULT_CONFIG.embedding
-    _ev    = DEFAULT_CONFIG.eval
-    _data  = DEFAULT_CONFIG.data
-    _agent = DEFAULT_CONFIG.agent
+    _ev     = DEFAULT_CONFIG.eval
+    _data   = DEFAULT_CONFIG.data
+    _agent  = DEFAULT_CONFIG.agent
+    _triage = DEFAULT_CONFIG.triage
 
     # LLM
     p.add_argument("--model",        default=_llm.model,            help="Ollama model name")
@@ -86,6 +88,13 @@ def parse_args() -> argparse.Namespace:
                                      help="Disable the Reviewer agent (single-agent mode)")
     p.add_argument("--max-rounds",   type=int, default=_agent.max_rounds,
                                      help="Max debate rounds before arbitration (default: 3)")
+
+    # Triage
+    p.add_argument("--triage",       action=argparse.BooleanOptionalAction,
+                                     default=_triage.use_triage,
+                                     help="Enable/disable per-contract triage shortlist")
+    p.add_argument("--max-shortlist", type=int, default=_triage.max_shortlist_size,
+                                     help="Max candidate vulnerabilities kept by triage per contract")
 
     # Data
     p.add_argument("--train",   default=_data.train_path)
@@ -139,6 +148,10 @@ def main() -> None:
             use_reviewer=use_reviewer,
             max_rounds=args.max_rounds,
         ),
+        triage=TriageConfig(
+            use_triage=args.triage,
+            max_shortlist_size=args.max_shortlist,
+        ),
         eval=EvalConfig(
             n_runs=args.runs,
             resume_run=args.resume_run,
@@ -166,6 +179,7 @@ def main() -> None:
     print(f"Model:       {cfg.llm.model}")
     print(f"Temperature: {cfg.llm.temperature}")
     print(f"RAG:         {cfg.retrieval.use_rag}  (top-k={cfg.retrieval.top_k})")
+    print(f"Triage:      {cfg.triage.use_triage}  (max-shortlist={cfg.triage.max_shortlist_size})")
     print(f"Max rounds:  {cfg.agent.max_rounds if use_reviewer else 'N/A (single-agent)'}")
     print(f"Runs:        {cfg.eval.n_runs}")
 
@@ -248,6 +262,7 @@ def main() -> None:
         vectorstore=vectorstore,
         owasp_lookup=owasp_lookup,
         vuln_desc_lookup=vuln_desc_lookup,
+        vuln_desc_df=vuln_desc_df,
     )
     print(f"Pipeline ready. Mode: {agent_mode_label}")
 

@@ -151,6 +151,9 @@ def analyze_pair(
         consensus_reached            = response.get("consensus_reached", False)
         reconciliation_weight_ratio  = float(response.get("reconciliation_weight_ratio", 0.0))
         detector_confidence_delta    = float(response.get("detector_confidence_delta", 0.0))
+        # Triage fields
+        triage_candidate = bool(response.get("triage_candidate", True))
+        triage_filtered  = reconciliation_rule == "triage_filtered"
 
         # Issues always come from the Detector
         detector_issues = analysis.get("issues", []) or []
@@ -159,6 +162,11 @@ def analyze_pair(
         is_predicted_positive = (final_verdict == "PRESENT")
         predicted_vulns = [vulnerability_name] if is_predicted_positive else []
 
+        if triage_filtered:
+            print(
+                "\n[triage] Target vulnerability not in contract shortlist — "
+                "auto-ABSENT (Detector/Reviewer skipped)"
+            )
         print(
             f"\nDetector: {detector_verdict} ({detector_confidence:.2f}) | "
             f"Reviewer: {reviewer_verdict} ({reviewer_confidence:.2f}) | "
@@ -213,6 +221,9 @@ def analyze_pair(
             "consensus_reached": consensus_reached,
             "reconciliation_weight_ratio": reconciliation_weight_ratio,
             "detector_confidence_delta": detector_confidence_delta,
+            # Triage columns
+            "triage_candidate": triage_candidate,
+            "triage_filtered": triage_filtered,
         }
 
     except Exception as e:
@@ -252,6 +263,9 @@ def analyze_pair(
             "consensus_reached": False,
             "reconciliation_weight_ratio": 0.0,
             "detector_confidence_delta": 0.0,
+            # Triage columns (defaults on failure)
+            "triage_candidate": True,
+            "triage_filtered": False,
         }
 
 

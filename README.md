@@ -4,7 +4,9 @@
 
 Este projeto implementa um **pipeline de auditoria de segurança de smart contracts baseado em LLMs**, usando uma arquitetura de **debate iterativo entre dois agentes** (Detector + Reviewer) orquestrada com [LangGraph](https://github.com/langchain-ai/langgraph). O pipeline analisa contratos Solidity em busca de vulnerabilidades conhecidas, compara os resultados com um ground truth e calcula métricas de classificação binária (TP, FP, TN, FN, Precision, Recall, F1, Accuracy).
 
-O Detector identifica vulnerabilidades ativamente; o Reviewer verifica de forma independente se o veredicto está correto. Quando o Reviewer não confirma o veredicto do Detector (`REFUTED` ou `UNCERTAIN`), um **nó de feedback determinístico** sintetiza a objeção e a devolve ao Detector para reavaliação na próxima rodada. Esse ciclo se repete até que os agentes cheguem a consenso ou o limite de rodadas (`max_rounds`) seja atingido. Em caso de **impasse**, o Reconciler atua como árbitro usando **arbitragem ponderada por confiança calibrada**, inspirada no ReConcile (Chen et al., ACL 2024).
+O Detector identifica vulnerabilidades ativamente; o Reviewer verifica de forma independente se o veredicto está correto. Quando o Reviewer não confirma o veredicto do Detector (`REFUTED` ou `UNCERTAIN`), um **nó de feedback determinístico** sintetiza a objeção e a devolve ao Detector para reavaliação na próxima rodada. Esse ciclo se repete até que os agentes cheguem a consenso ou o limite de rodadas (`max_rounds`) seja atingido. Em caso de **impasse** (sem consenso após `max_rounds`), o Reconciler aplica a **regra de autoridade do Reviewer**: se o último veredicto do Reviewer foi `REFUTED`, o Reviewer vence e o veredicto final é invertido; se foi `UNCERTAIN`, o Detector prevalece.
+
+Antes do fluxo de análise, uma camada opcional de **Triage** (habilitada por padrão) faz **uma chamada LLM por contrato** para pré-selecionar quais vulnerabilidades do catálogo são candidatas plausíveis. Pares cujo alvo fica fora dessa shortlist são resolvidos automaticamente como `ABSENT` (regra `triage_filtered`), pulando Detector e Reviewer — o que reduz drasticamente o número de chamadas ao LLM. A shortlist é cacheada por contrato (sha256 do código).
 
 O modelo de linguagem é executado **localmente via [Ollama](https://ollama.com/)** (padrão: `gemma3:27b`). O contexto de referência sobre vulnerabilidades vem do catálogo **OWASP Smart Contract Weakness Enumeration (SCWE)**.
 
@@ -19,12 +21,12 @@ smart_contract_audit_agents/
 ├── __init__.py
 │
 ├── pipeline/
-│   ├── graph.py                  # Montagem do grafo LangGraph (AuditPipeline)
-│   ├── nodes.py                  # Funções de nó: Detector, Reviewer, Feedback, Reconciler, etc.
-│   └── prompt.py                 # Templates de prompt (Detector RAG, Detector Direct, Reviewer)
+│   ├── graph.py                  # Montagem do grafo LangGraph (AuditPipeline, roteamento triage/debate)
+│   ├── nodes.py                  # Funções de nó: Triage, Detector, Reviewer, Feedback, Reconciler, etc.
+│   └── prompt.py                 # Templates de prompt (Triage, Detector RAG, Detector Direct, Reviewer)
 │
 ├── models/
-│   ├── schemas.py                # Tipos: RAGState (TypedDict), VulnerabilityAnalysis, ReviewerOutput
+│   ├── schemas.py                # Tipos: RAGState (TypedDict), VulnerabilityAnalysis, ReviewerOutput, TriageOutput
 │   ├── llm.py                    # Factory do OllamaLLM
 │   ├── embeddings.py             # Factory de embeddings (HuggingFace ou Ollama)
 │   └── vectorstore.py            # Criação/carregamento do ChromaDB
@@ -118,7 +120,9 @@ Config(
 | Retrieval | `top_k` | `3` | Documentos recuperados por query |
 | Retrieval | `use_hybrid` | `True` | Filtro por categoria + fallback semântico |
 | Agent | `use_reviewer` | `True` | Dual-agent (True) ou single-agent (False) |
-| Agent | `max_rounds` | `3` | Máximo de rodadas de debate antes da arbitragem |
+| Agent | `max_rounds` | `3` | Máximo de rodadas de debate antes da reconciliação |
+| Triage | `use_triage` | `True` | Habilita o pré-filtro de triage por contrato |
+| Triage | `max_shortlist_size` | `15` | Máximo de vulnerabilidades candidatas mantidas por contrato |
 | Data | `owasp_registry_path` | `.../owasp_scwe.csv` | Catálogo OWASP SCWE |
 | Data | `use_test_subset` | `False` | `True` = avalia apenas `test_subset_size` contratos (toggle rápido) |
 | Data | `test_subset_size` | `5` | Contratos a avaliar quando `use_test_subset=True` |
@@ -129,9 +133,13 @@ Config(
 
 ### Topologias do Grafo LangGraph
 
-O grafo é montado em `pipeline/graph.py` e varia conforme as flags. Quando o Reviewer está ativo, o grafo forma um **loop de debate**; quando desativado, permanece linear.
+O grafo é montado em `pipeline/graph.py` e varia conforme as flags (RAG on/off, Reviewer on/off, Triage on/off). Quando o Reviewer está ativo, o grafo forma um **loop de debate**; quando desativado, permanece linear. Quando o Triage está ativo (padrão), ele é o **ponto de entrada** do grafo e roteia cada par via `route_after_triage`: alvos na shortlist seguem para o fluxo normal (`retrieve` ou `detector`), alvos fora dela vão direto para `triage_reject → parse_output → END`.
 
 ```
+Triage (padrão — ortogonal às 4 topologias abaixo):
+  triage ─┬─ alvo na shortlist ──→ [entrada normal: retrieve ou detector]
+          └─ fora da shortlist ──→ triage_reject → parse_output → END
+
 RAG + Dual-Agent (padrão):
   retrieve → generate_context → detector → reviewer
                                                │
@@ -177,6 +185,10 @@ RAGState:
   context                      # docs formatados como texto
   retrieval_mode               # "semantic_only" | "category_only" | "hybrid"
 
+  # Triage
+  triage_shortlist             # vulnerabilidades do catálogo pré-selecionadas para este contrato
+  triage_candidate             # False → par auto-resolvido como ABSENT (regra "triage_filtered")
+
   # Saídas do Detector (última rodada)
   detector_verdict             # "PRESENT" | "ABSENT"
   detector_confidence          # 0.0 – 1.0
@@ -201,8 +213,11 @@ RAGState:
   # Saídas do Reconciler
   final_verdict                # "PRESENT" | "ABSENT"
   final_confidence             # confiança reconciliada (arredondada a 4 casas)
-  reconciliation_rule          # "consensus_round_N" | "weighted_arbitration_round_N" | "rule_0_detector_only"
-  reconciliation_weight_ratio  # ratio do peso dominante na arbitragem ponderada (0.0 quando consenso)
+  reconciliation_rule          # "consensus_round_N" | "reviewer_authority_refuted_round_N"
+                               #   | "detector_prevails_uncertain_round_N" | "rule_0_detector_only"
+                               #   | "triage_filtered"
+  reconciliation_weight_ratio  # sempre 0.0 (campo reservado; a arbitragem ponderada foi
+                               #   substituída pela regra de autoridade do Reviewer)
 
   # Transcrição completa da conversa (sempre coletada; impressa com --conversation)
   conversation_log             # [{round, agent, prompt, response}, ...]
@@ -223,6 +238,25 @@ RAGState:
 ---
 
 ## Nós do Pipeline — `pipeline/nodes.py`
+
+### `make_triage_node` *(pré-filtro, LLM, cacheado por contrato)*
+
+Faz **uma chamada LLM por contrato único** (cache por `sha256` do código, mantido pelo `AuditPipeline` e compartilhado entre invocações do grafo) para pré-selecionar as vulnerabilidades do catálogo que são candidatas plausíveis. Todos os pares seguintes do mesmo contrato reusam a shortlist cacheada.
+
+- Recebe o catálogo completo (nome + descrição truncada a 150 chars) e o código do contrato.
+- Instruído a ser **inclusivo**: só exclui vulnerabilidades cujos construtos exigidos claramente não existem no código; copia os nomes **verbatim** do catálogo; no máximo `max_shortlist_size` candidatos.
+- Mapeia os nomes retornados de volta aos nomes canônicos do catálogo (normalizado + substring), **descartando alucinações**.
+- **Fail-open:** se a shortlist ficar vazia (erro do LLM, parsing inválido ou nenhum match), assume o **catálogo inteiro** — nunca zera um contrato por falha da triage.
+- Escreve `triage_shortlist` e `triage_candidate` (= o alvo atual está na shortlist?).
+
+### `triage_reject_node` *(determinístico, sem LLM)*
+
+Resolve os pares cujo alvo **ficou fora** da shortlist. Sem chamada ao LLM: registra o par como `ABSENT` e flui direto para `parse_output_node`, pulando Detector/Reviewer/Reconciler.
+- `final_verdict = "ABSENT"`, `final_confidence = 1.0`, `reconciliation_rule = "triage_filtered"`
+
+### `route_after_triage` *(função de roteamento)*
+
+Edge condicional após `triage_node`: retorna `"accept"` (alvo na shortlist → fluxo normal, entrando em `retrieve` ou `detector`) ou `"reject"` (→ `triage_reject_node`).
 
 ### `retrieve_node` (RAG)
 Consulta o ChromaDB com o nome da vulnerabilidade e o código do contrato. Usa estratégia **híbrida** por padrão:
@@ -317,45 +351,35 @@ Nó determinístico sem LLM. Possui três caminhos distintos:
 
 **Caminho 1 — Consenso atingido (`consensus_reached == True`):**
 
-O Detector tem razão (confirmado pelo Reviewer). A confiança final é penalizada por rodadas extras, pois consenso tardio indica menor certeza:
+O Reviewer confirmou o Detector. O veredicto e a confiança do Detector são adotados diretamente, **sem penalidade por rodada**:
 
 ```
-rounds_penalty   = (current_round - 1) × 0.05
-final_confidence = max(detector_confidence - rounds_penalty, 0.1)
 final_verdict    = detector_verdict
+final_confidence = detector_confidence
 ```
-
-Exemplos: consenso na rodada 1 → sem penalidade; rodada 2 → -0.05; rodada 3 → -0.10.
 
 `reconciliation_rule = "consensus_round_N"` (ex: `consensus_round_1`, `consensus_round_3`)
 
 **Caminho 2 — Impasse após `max_rounds` (`consensus_reached == False`):**
 
-Arbitragem ponderada por confiança calibrada, inspirada no **ReConcile** (Chen et al., ACL 2024 — [arxiv.org/abs/2309.13007](https://arxiv.org/abs/2309.13007)). A temperatura `T = 0.7 < 1` suaviza o overconfidence dos LLMs comprimindo a distribuição de pesos:
+O Reviewer nunca confirmou dentro do limite de rodadas. A decisão segue a **regra de autoridade do Reviewer**, com base no seu último veredicto:
 
-```
-TEMPERATURE = 0.7
+- **Reviewer `REFUTED`** → o Reviewer apresentou evidência de erro e **vence**; o veredicto final é o **oposto** do Detector, com a confiança do Reviewer:
+  ```
+  final_verdict    = "ABSENT" se detector = "PRESENT", senão "PRESENT"
+  final_confidence = reviewer_confidence
+  reconciliation_rule = "reviewer_authority_refuted_round_N"
+  ```
+- **Reviewer `UNCERTAIN`** → dúvida insuficiente para refutar; o **Detector prevalece**:
+  ```
+  final_verdict    = detector_verdict
+  final_confidence = detector_confidence
+  reconciliation_rule = "detector_prevails_uncertain_round_N"
+  ```
 
-# Pesos na direção do veredicto de cada agente:
-if detector_verdict == "PRESENT":
-    w_present = detector_confidence ^ (1 / T)   # Detector apoia PRESENT
-    w_absent  = reviewer_confidence ^ (1 / T)   # Reviewer (ao refutar) apoia ABSENT
-else:  # detector disse ABSENT
-    w_absent  = detector_confidence ^ (1 / T)
-    w_present = reviewer_confidence ^ (1 / T)
+Em todos os caminhos, `reconciliation_weight_ratio = 0.0` — campo reservado; a antiga **arbitragem ponderada por confiança** (inspirada no ReConcile, Chen et al., ACL 2024) foi **substituída** por esta regra de autoridade do Reviewer.
 
-total       = w_present + w_absent
-ratio       = w_present / total
-
-final_verdict    = "PRESENT" if ratio > 0.5 else "ABSENT"
-final_confidence = max(w_present, w_absent) / total   # confiança do lado vencedor
-```
-
-Caso especial: se `total == 0` (ambas as confidências são 0.0), `final_verdict = "ABSENT"` e `final_confidence = 0.0`.
-
-`reconciliation_rule = "weighted_arbitration_round_N"` (ex: `weighted_arbitration_round_3`)
-
-`reconciliation_weight_ratio` guarda o `final_confidence` arredondado (ratio do peso dominante), disponível como coluna de diagnóstico no CSV.
+> **Triage:** pares filtrados pela triage **não passam** pelo `reconcile_node`. São resolvidos pelo `triage_reject_node` como `ABSENT`, com `reconciliation_rule = "triage_filtered"` e `final_confidence = 1.0`.
 
 ### `parse_output_node`
 Monta o `parsed_output` final com `final_verdict`, `final_confidence` e `detector_issues`.
@@ -364,7 +388,16 @@ Monta o `parsed_output` final com `final_verdict`, `final_confidence` e `detecto
 
 ## Prompts — `pipeline/prompt.py`
 
-Três templates com placeholders `{...}`:
+Quatro templates com placeholders `{...}`:
+
+### `TRIAGE_PROMPT_TEMPLATE`
+Usado pela camada de triage (uma vez por contrato). Recebe:
+- `{vuln_catalog}` — catálogo de vulnerabilidades (nome + descrição truncada)
+- `{query}` — código do contrato
+- `{max_shortlist}` — máximo de candidatos
+- `{format_instructions}` — schema JSON Pydantic (`TriageOutput`)
+
+Instrui o agente a ser **inclusivo** (na dúvida, incluir), excluindo apenas o que claramente não se aplica, e a copiar os nomes **verbatim** do catálogo. Não confirma vulnerabilidades — apenas seleciona candidatos para análise profunda.
 
 ### `DETECTOR_RAG_PROMPT_TEMPLATE`
 Usado quando RAG está ativo. Contém (na ordem):
@@ -458,17 +491,20 @@ para cada run em [1..n_runs]:
 
 ## Métricas — `evaluation/metrics.py`
 
-Para cada par `(contrato, vulnerabilidade_alvo)`:
+Para cada par `(contrato, vulnerabilidade_alvo)`, `classify_pair` computa uma classificação binária:
 
 ```
-ground_truth_positive = (ground_truth_vuln == target_vuln)
-predicted_positive    = (final_verdict == "PRESENT") AND (final_confidence >= threshold)
+ground_truth_positive = (ground_truth_vuln.lower() == target_vuln.lower())   # match exato
+predicted_positive    = (final_verdict == "PRESENT")                          # SEM threshold de confiança
 
 TP: GT=positivo, Pred=positivo
 FP: GT=negativo, Pred=positivo
 TN: GT=negativo, Pred=negativo
 FN: GT=positivo, Pred=negativo
 ```
+
+- O ground truth é positivo **apenas** quando o rótulo do contrato é exatamente igual (case-insensitive) à vulnerabilidade-alvo da iteração — por isso o rótulo do test set precisa pertencer ao vocabulário de `vulnerabilities_description.csv`.
+- A predição é positiva quando o veredicto final reconciliado é `PRESENT` (o `runner` monta `predicted_vulns = [vuln_name]` se `PRESENT`, senão `[]`; `classify_pair` casa por substring entre alvo e predição). **Não há corte por `final_confidence`** — a confiança é registrada apenas como coluna de diagnóstico, não afeta TP/FP/TN/FN.
 
 Métricas calculadas: Precision, Recall, F1, Accuracy.
 
@@ -484,23 +520,25 @@ Ao fim da avaliação, são gerados 5 arquivos em `results/<model>/<MM-YYYY>/<ta
 | `results_contract.csv` | Sumário por contrato: soma de TP/FP/TN/FN, tempo |
 | `results_vuln.csv` | Métricas agregadas por tipo de vulnerabilidade (inclui métricas de debate) |
 | `results_global.csv` | Métricas globais por run (Precision, Recall, F1, Accuracy) |
-| `experiment_summary.md` | Relatório Markdown com configuração, matriz de confusão e top vulnerabilidades por F1 |
+| `experiment_summary.md` | Relatório Markdown com configuração, matriz de confusão, top vulnerabilidades por F1 e **auditoria da triage** (quando ativa) |
 
 ### Colunas em `results_pairs.csv` — dual-agent
 
 Colunas do agente individual (existentes):
 - `detector_verdict`, `detector_confidence`, `detector_reasoning`
 - `reviewer_verdict`, `reviewer_confidence`, `reviewer_reasoning`
-- `reconciliation_rule` — nome da regra aplicada (`consensus_round_N`, `weighted_arbitration_round_N` ou `rule_0_detector_only`)
+- `reconciliation_rule` — nome da regra aplicada: `consensus_round_N`, `reviewer_authority_refuted_round_N`, `detector_prevails_uncertain_round_N`, `rule_0_detector_only` ou `triage_filtered`
 
-Colunas do ciclo de debate (novas):
+Colunas do ciclo de debate e da triage:
 
 | Coluna | Origem | Descrição |
 |---|---|---|
-| `rounds_to_consensus` | `current_round` se consenso, senão `max_rounds` | Rodadas até acordo — ou o limite se houve impasse |
+| `rounds_to_consensus` | `current_round` se consenso, senão `max_rounds` | Rodadas até acordo — ou o limite se houve impasse (`0` se filtrado pela triage) |
 | `consensus_reached` | `state["consensus_reached"]` | `True` se os agentes concordaram antes do limite |
-| `reconciliation_weight_ratio` | `reconcile_node` | Ratio do peso dominante na arbitragem ponderada; `0.0` quando houve consenso |
+| `reconciliation_weight_ratio` | `reconcile_node` | Sempre `0.0` — campo reservado da antiga arbitragem ponderada (hoje substituída pela autoridade do Reviewer) |
 | `detector_confidence_delta` | `debate_history[-1].confidence - debate_history[0].confidence` | Variação de confiança do Detector entre a primeira e a última rodada; `0.0` se só houve uma rodada |
+| `triage_candidate` | `triage_node` | `True` se o alvo estava na shortlist de triage do contrato |
+| `triage_filtered` | `reconciliation_rule == "triage_filtered"` | `True` se o par foi auto-resolvido como ABSENT pela triage (Detector/Reviewer pulados) |
 
 ### Novas agregações em `results_vuln.csv`
 
@@ -510,6 +548,8 @@ Além das métricas de classificação (TP/FP/TN/FN), o CSV por vulnerabilidade 
 |---|---|
 | `avg_rounds_to_consensus` | Média de rodadas até acordo para cada tipo de vulnerabilidade |
 | `consensus_rate` | Fração de pares que chegaram a consenso antes do limite |
+| `triage_shortlist_rate` | Fração de pares cujo alvo sobreviveu à shortlist de triage |
+| `triage_filtered_rate` | Fração de pares auto-resolvidos como ABSENT pela triage |
 
 **Valor analítico:** vulnerabilidades com `avg_rounds_to_consensus` alta e `consensus_rate` baixa são as mais **controversas** entre os agentes — indicam casos em que o padrão é genuinamente ambíguo no código, o Detector e o Reviewer interpretam evidências de forma divergente, ou a definição canônica é insuficientemente precisa. Esse padrão é um resultado de pesquisa por si só, independente das métricas de classificação final.
 
@@ -517,7 +557,7 @@ Além das métricas de classificação (TP/FP/TN/FN), o CSV por vulnerabilidade 
 
 ## Como Executar
 
-### Execução padrão (RAG + dual-agent + gemma3:27b)
+### Execução padrão (RAG + dual-agent + triage + gemma3:27b)
 ```bash
 python run.py
 ```
@@ -535,6 +575,15 @@ python run.py --model deepseek-r1:14b --temperature 0.0
 
 # Definir número máximo de rodadas de debate (padrão: 3)
 python run.py --max-rounds 5
+
+# Desabilitar a camada de triage (avalia todas as vulnerabilidades, sem pré-filtro)
+python run.py --no-triage
+
+# Ajustar o tamanho máximo da shortlist de triage (padrão: 15)
+python run.py --max-shortlist 20
+
+# Usar um test set customizado (qualquer CSV com colunas: code, vulnerability, line)
+python run.py --test /caminho/para/meu_testset.csv
 
 # Testar em subconjunto de N contratos via CLI
 python run.py --subset 10
@@ -598,9 +647,14 @@ run.py
     ├─ OWASPLookup.lookup_formatted(vuln_name)  ──► injecta bloco OWASP no estado
     ├─ VulnDescLookup.lookup(vuln_name)         ──► descrição canônica para Reviewer
     ├─ Inicializa estado: current_round=1, max_rounds=N,
-    │                     consensus_reached=False, debate_history=[], reviewer_feedback=""
+    │                     consensus_reached=False, debate_history=[], reviewer_feedback="",
+    │                     triage_candidate=True, triage_shortlist=[]
     │
     └─ LangGraph workflow:
+        │
+        ├─ [Triage] triage_node (1 chamada LLM por contrato, cacheado por sha256)
+        │   ├─ alvo fora da shortlist → triage_reject → parse_output → END (ABSENT)
+        │   └─ alvo na shortlist → segue o fluxo normal ↓
         │
         ├─ [RAG] retrieve_node
         │   └─ ChromaDB.similarity_search (híbrido: filtro por categoria + semântico)
@@ -637,12 +691,13 @@ run.py
         │
         ├─ reconcile_node (determinístico, sem LLM)
         │   ├─ [single-agent] rule_0_detector_only → passa Detector direto
-        │   ├─ [consenso] final = detector_verdict
-        │   │             confiança = max(d_conf - (round-1)×0.05, 0.1)
-        │   │             rule = "consensus_round_N"
-        │   └─ [impasse]  arbitragem ponderada: w = conf^(1/0.7)
-        │                 final = PRESENT se w_present/total > 0.5
-        │                 rule = "weighted_arbitration_round_N"
+        │   ├─ [consenso]  final = detector_verdict (sem penalidade)
+        │   │              rule = "consensus_round_N"
+        │   └─ [impasse]   autoridade do Reviewer:
+        │                  REFUTED   → inverte veredicto, conf = reviewer_conf
+        │                              rule = "reviewer_authority_refuted_round_N"
+        │                  UNCERTAIN → mantém Detector
+        │                              rule = "detector_prevails_uncertain_round_N"
         │
         └─ parse_output_node
             └─ monta parsed_output final

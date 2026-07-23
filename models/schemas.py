@@ -43,6 +43,13 @@ class ReviewerOutput(BaseModel):
     )
 
 
+class TriageOutput(BaseModel):
+    candidate_vulnerabilities: List[str] = Field(
+        description="Names of catalog vulnerabilities that are plausible candidates for this contract, copied VERBATIM from the catalog",
+        default=[],
+    )
+
+
 class RAGState(TypedDict):
     """State carried through the LangGraph workflow."""
     query: str
@@ -56,6 +63,10 @@ class RAGState(TypedDict):
     debug: bool
     retrieval_mode: str  # "semantic_only" | "category_only" | "hybrid"
     owasp_context: str   # formatted OWASP SCWE entry, or "" if no match
+
+    # Triage outputs
+    triage_shortlist: List[str]  # catalog vulns shortlisted for this contract
+    triage_candidate: bool       # False → pair auto-resolved as ABSENT ("triage_filtered")
 
     # Detector outputs
     detector_verdict: str       # "PRESENT" | "ABSENT"

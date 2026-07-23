@@ -24,3 +24,6 @@ env/
 # Logs
 conversa.txt
 conversa2.txt
+
+# Resumo técnico (documento local)
+RESUMO_TECNICO.md

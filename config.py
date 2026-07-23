@@ -68,6 +68,17 @@ class AgentConfig:
 
 
 # ─────────────────────────────────────────────
+# Triage (pre-filter before Detector/Reviewer)
+# ─────────────────────────────────────────────
+@dataclass
+class TriageConfig:
+    # One LLM call per contract shortlists plausible vulnerabilities;
+    # pairs outside the shortlist are auto-resolved as ABSENT (rule "triage_filtered")
+    use_triage: bool = True
+    max_shortlist_size: int = 15   # hard cap on candidates kept per contract
+
+
+# ─────────────────────────────────────────────
 # Evaluation loop
 # ─────────────────────────────────────────────
 @dataclass
@@ -107,6 +118,7 @@ class Config:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    triage: TriageConfig = field(default_factory=TriageConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     data: DataConfig = field(default_factory=DataConfig)
 

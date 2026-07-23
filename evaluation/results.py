@@ -29,6 +29,13 @@ def _df_to_md(df: pd.DataFrame, float_fmt: str = ".4f") -> str:
     return "\n".join([header, sep] + rows)
 
 
+def _coerce_bool(s: pd.Series) -> pd.Series:
+    """Normalize a boolean column that may come back as strings from CSV."""
+    if s.dtype == bool:
+        return s
+    return s.astype(str).str.strip().str.lower().isin(("true", "1", "1.0"))
+
+
 def _vuln_top_table(vuln_df: pd.DataFrame, n: int = 10) -> str:
     """Top-N vulnerabilities by F1, formatted as Markdown table."""
     df = vuln_df.copy()
@@ -87,12 +94,21 @@ def save_results(
         else pairs_df
     )
 
+    successful = successful.copy()
+    for _bcol in ("triage_candidate", "triage_filtered", "is_ground_truth_positive"):
+        if _bcol in successful.columns:
+            successful[_bcol] = _coerce_bool(successful[_bcol])
+
     # ── Per vulnerability ─────────────────────────────────────────────────────
     agg_cols = {"tp": "sum", "fp": "sum", "tn": "sum", "fn": "sum"}
     if "rounds_to_consensus" in successful.columns:
         agg_cols["rounds_to_consensus"] = "mean"
     if "consensus_reached" in successful.columns:
         agg_cols["consensus_reached"] = "mean"
+    if "triage_candidate" in successful.columns:
+        agg_cols["triage_candidate"] = "mean"
+    if "triage_filtered" in successful.columns:
+        agg_cols["triage_filtered"] = "mean"
 
     vuln_df = (
         successful
@@ -103,6 +119,8 @@ def save_results(
             "target_vulnerability": "vulnerability",
             "consensus_reached": "consensus_rate",
             "rounds_to_consensus": "avg_rounds_to_consensus",
+            "triage_candidate": "triage_shortlist_rate",
+            "triage_filtered": "triage_filtered_rate",
         })
     )
 
@@ -141,6 +159,32 @@ def save_results(
     total_m = int((total_time_seconds % 3600) // 60)
     total_s = int(total_time_seconds % 60)
     total_time_str = f"{total_h}h {total_m}m {total_s}s" if total_h else f"{total_m}m {total_s}s"
+
+    # ── Triage audit metrics ──────────────────────────────────────────────────
+    # Triage recall: fraction of ground-truth-positive pairs whose target vuln
+    # survived the triage shortlist. Every GT-positive pair resolved via
+    # "triage_filtered" is a systematic false negative introduced by triage.
+    triage_section = ""
+    if "triage_candidate" in successful.columns and "triage_filtered" in successful.columns:
+        gt_pos = successful[successful["is_ground_truth_positive"]]
+        n_gt_pos          = len(gt_pos)
+        n_gt_pos_kept     = int(gt_pos["triage_candidate"].sum())
+        n_gt_pos_filtered = int(gt_pos["triage_filtered"].sum())
+        triage_recall     = _safe_div(n_gt_pos_kept, n_gt_pos)
+        n_filtered        = int(successful["triage_filtered"].sum())
+        filter_rate       = _safe_div(n_filtered, len(successful))
+
+        triage_section = f"""
+---
+
+## Triage Audit
+
+| Metric | Value |
+| --- | --- |
+| Triage recall (GT-positive pairs kept in shortlist) | **{triage_recall:.4f}** ({n_gt_pos_kept}/{n_gt_pos}) |
+| GT-positive pairs discarded by triage (systematic FN) | {n_gt_pos_filtered} |
+| Pairs resolved via `triage_filtered` (Detector/Reviewer skipped) | {n_filtered} ({filter_rate:.1%} of all pairs) |
+"""
 
     # ── Agent mode info ───────────────────────────────────────────────────────
     use_reviewer = cfg.agent.use_reviewer
@@ -184,6 +228,13 @@ def save_results(
 | Mode | `{agent_mode}` |
 | use_reviewer | `{use_reviewer}` |
 | max_rounds | `{cfg.agent.max_rounds}` |
+
+### Triage
+
+| Parameter | Value |
+| --- | --- |
+| use_triage | `{cfg.triage.use_triage}` |
+| max_shortlist_size | `{cfg.triage.max_shortlist_size}` |
 
 ### LLM
 
@@ -252,7 +303,7 @@ def save_results(
 | Recall | **{m.recall:.4f}** |
 | F1-score | **{m.f1:.4f}** |
 | Accuracy | **{m.accuracy:.4f}** |
-
+{triage_section}
 ---
 
 ## Results per Run
@@ -292,6 +343,8 @@ def save_results(
 | `consensus_reached` | True if Reviewer confirmed Detector before the round limit |
 | `reconciliation_weight_ratio` | Dominant weight ratio in weighted arbitration (0.0 on consensus) |
 | `detector_confidence_delta` | Detector confidence change from round 1 to final round |
+| `triage_candidate` | True if the target vulnerability was in the contract's triage shortlist |
+| `triage_filtered` | True if the pair was auto-resolved as ABSENT via `triage_filtered` (no Detector/Reviewer) |
 
 ### New columns in results_vuln.csv (dual-agent)
 
@@ -299,6 +352,8 @@ def save_results(
 | --- | --- |
 | `avg_rounds_to_consensus` | Mean rounds to agreement per vulnerability type |
 | `consensus_rate` | Fraction of pairs that reached consensus (reveals controversial vulnerabilities) |
+| `triage_shortlist_rate` | Fraction of pairs whose target vuln survived the triage shortlist |
+| `triage_filtered_rate` | Fraction of pairs auto-resolved as ABSENT by triage |
 """
 
     with open(summary_md, "w", encoding="utf-8") as f:

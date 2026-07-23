@@ -2,6 +2,8 @@
 LangGraph node functions for the dual-agent audit pipeline.
 
 Nodes:
+  make_triage_node          — per-contract vulnerability shortlist (LLM, cached per contract)
+  triage_reject_node        — auto-ABSENT for pairs filtered out by triage (no LLM)
   make_retrieve_node        — vector similarity search (RAG only)
   generate_context_node     — format retrieved docs as text (RAG only)
   make_detector_node        — Detector LLM call (active vulnerability search)
@@ -12,10 +14,11 @@ Nodes:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
@@ -23,13 +26,16 @@ from langchain_core.output_parsers import PydanticOutputParser
 from smart_contract_audit_agents.models.schemas import (
     RAGState,
     ReviewerOutput,
+    TriageOutput,
     VulnerabilityAnalysis,
 )
 from smart_contract_audit_agents.pipeline.prompt import (
     DETECTOR_DIRECT_PROMPT_TEMPLATE,
     DETECTOR_RAG_PROMPT_TEMPLATE,
     REVIEWER_PROMPT_TEMPLATE,
+    TRIAGE_PROMPT_TEMPLATE,
 )
+from smart_contract_audit_agents.utils.vuln_desc_lookup import _norm as _norm_vuln
 
 if TYPE_CHECKING:
     from langchain_chroma import Chroma
@@ -39,6 +45,7 @@ if TYPE_CHECKING:
 # Shared output parsers (stateless, safe to reuse)
 _detector_parser = PydanticOutputParser(pydantic_object=VulnerabilityAnalysis)
 _reviewer_parser = PydanticOutputParser(pydantic_object=ReviewerOutput)
+_triage_parser = PydanticOutputParser(pydantic_object=TriageOutput)
 
 
 # ─── Code truncation ──────────────────────────────────────────────────────────
@@ -60,6 +67,157 @@ def _truncate_code(code: str, max_chars: int) -> str:
         f"(kept first {keep_top} + last {keep_bottom})"
     )
     return truncated
+
+
+# ─── Triage nodes ─────────────────────────────────────────────────────────────
+
+def make_triage_node(
+    llm: "OllamaLLM",
+    cfg: "Config",
+    vuln_catalog: List[Tuple[str, str]],
+    shortlist_cache: Dict[str, List[str]],
+):
+    """Return a triage node that shortlists plausible vulnerabilities per contract.
+
+    One LLM call per unique contract: *shortlist_cache* is owned by AuditPipeline
+    (keyed by sha256 of the code) and shared across graph invocations, so every
+    (contract, vulnerability) pair after the first reuses the cached shortlist.
+    Writes: triage_shortlist, triage_candidate.
+    """
+    max_retries = cfg.llm.max_retries
+    retry_delay = cfg.llm.retry_delay
+    max_code_chars = cfg.llm.max_code_chars
+    max_shortlist = cfg.triage.max_shortlist_size
+
+    catalog_names = [name for name, _ in vuln_catalog]
+    norm_to_name = {_norm_vuln(name): name for name in catalog_names}
+    # Truncated descriptions keep the catalog block small (~60 entries) so the
+    # contract keeps almost the full num_ctx budget
+    catalog_text = "\n".join(f"- {name}: {desc[:150]}" for name, desc in vuln_catalog)
+
+    def _match_catalog(candidate: str) -> "str | None":
+        norm = _norm_vuln(str(candidate))
+        if norm in norm_to_name:
+            return norm_to_name[norm]
+        for key, name in norm_to_name.items():
+            if norm and (norm in key or key in norm):
+                return name
+        return None
+
+    def triage_node(state: RAGState) -> RAGState:
+        code_hash = hashlib.sha256(state["query"].encode()).hexdigest()
+
+        if code_hash not in shortlist_cache:
+            code = _truncate_code(state["query"], max_code_chars)
+            prompt = TRIAGE_PROMPT_TEMPLATE.format(
+                vuln_catalog=catalog_text,
+                query=code,
+                max_shortlist=max_shortlist,
+                format_instructions=_triage_parser.get_format_instructions(),
+            )
+
+            if state.get("debug", False):
+                print("=" * 80)
+                print("TRIAGE PROMPT (DEBUG MODE)")
+                print("=" * 80)
+                print(prompt)
+                print("=" * 80)
+                print("Sending triage prompt to LLM...\n")
+
+            last_error: Exception | None = None
+            raw_response = ""
+            for attempt in range(1, max_retries + 1):
+                try:
+                    raw_response = llm.invoke(prompt)
+                    state["messages"].append(HumanMessage(content="Triage shortlist completed"))
+                    break
+                except Exception as e:
+                    last_error = e
+                    is_ollama_crash = any(
+                        kw in str(e).lower()
+                        for kw in ("eof", "connection", "failed to sample", "500", "timeout")
+                    )
+                    if is_ollama_crash and attempt < max_retries:
+                        print(
+                            f"\n[Triage retry {attempt}/{max_retries}] Ollama runner error: {e}. "
+                            f"Waiting {retry_delay}s before retry..."
+                        )
+                        time.sleep(retry_delay)
+                    else:
+                        raw_response = f"Triage failed after {max_retries} attempts: {last_error}"
+                        state["messages"].append(
+                            HumanMessage(content=f"Triage failed: {last_error}")
+                        )
+                        break
+
+            # Parse triage output
+            try:
+                parsed = _triage_parser.parse(raw_response)
+                candidates = parsed.candidate_vulnerabilities
+            except Exception:
+                try:
+                    match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+                    if match:
+                        data = json.loads(match.group())
+                        candidates = data.get("candidate_vulnerabilities", []) or []
+                    else:
+                        raise ValueError("No JSON found in triage response")
+                except Exception:
+                    candidates = []
+
+            # Map LLM names back to canonical catalog names, drop hallucinated ones
+            shortlist: List[str] = []
+            for cand in candidates:
+                matched = _match_catalog(cand)
+                if matched and matched not in shortlist:
+                    shortlist.append(matched)
+            shortlist = shortlist[:max_shortlist]
+
+            # Fail-open: an empty shortlist (LLM error, unparseable output, no
+            # catalog match) must not auto-ABSENT the entire contract
+            if not shortlist:
+                print("[triage] Empty/unmatched shortlist — failing open (full catalog)")
+                shortlist = list(catalog_names)
+
+            shortlist_cache[code_hash] = shortlist
+            print(
+                f"[triage] New shortlist for contract {code_hash[:12]}: "
+                f"{len(shortlist)}/{len(catalog_names)} candidate vulns"
+            )
+
+            conv_log = list(state.get("conversation_log", []))
+            conv_log.append({
+                "round": 0,
+                "agent": "triage",
+                "prompt": prompt,
+                "response": raw_response,
+            })
+            state["conversation_log"] = conv_log
+
+        shortlist = shortlist_cache[code_hash]
+        norm_shortlist = {_norm_vuln(name) for name in shortlist}
+        state["triage_shortlist"] = shortlist
+        state["triage_candidate"] = _norm_vuln(state["vulnerability_name"]) in norm_shortlist
+        return state
+
+    return triage_node
+
+
+def triage_reject_node(state: RAGState) -> dict:
+    """Resolve a pair whose target vulnerability was filtered out by triage.
+
+    No LLM call — the pair is recorded as ABSENT and flows straight to
+    parse_output_node, skipping Detector/Reviewer/Reconciler.
+    """
+    return {
+        "final_verdict": "ABSENT",
+        "final_confidence": 1.0,
+        "reconciliation_rule": "triage_filtered",
+        "detector_verdict": "ABSENT",
+        "detector_confidence": 0.0,
+        "detector_issues": [],
+        "detector_reasoning": "Target vulnerability not shortlisted by triage for this contract.",
+    }
 
 
 # ─── RAG nodes ────────────────────────────────────────────────────────────────

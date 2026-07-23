@@ -1,11 +1,48 @@
 """
 Prompt templates for the dual-agent vulnerability analysis pipeline.
 
-Three variants:
+Four variants:
+  - TRIAGE_PROMPT_TEMPLATE         : Triage (one call per contract, shortlists candidates)
   - DETECTOR_RAG_PROMPT_TEMPLATE   : Detector with RAG context
   - DETECTOR_DIRECT_PROMPT_TEMPLATE: Detector without RAG context
   - REVIEWER_PROMPT_TEMPLATE       : Reviewer (devil's advocate, no RAG)
 """
+
+TRIAGE_PROMPT_TEMPLATE = """\
+You are a Solidity security TRIAGE agent. Your job is NOT to confirm vulnerabilities —
+it is to decide which vulnerability types from the catalog below are PLAUSIBLE
+candidates for this specific contract and deserve a deep, dedicated analysis.
+
+Vulnerability Catalog
+{vuln_catalog}
+
+Smart Contract Code
+{query}
+
+─── TRIAGE ANALYSIS (think before you decide) ────────────────────────────────
+Scan the contract for the language constructs and patterns each catalog entry
+requires (external calls, delegatecall, selfdestruct, block values, arithmetic,
+access control, loops, randomness sources, tx.origin, assembly, etc.), then
+select the candidate subset.
+
+Selection rules
+- BE INCLUSIVE: if a vulnerability could plausibly apply to this contract,
+  include it. Missing a real vulnerability is far worse than keeping an extra
+  candidate for deeper analysis.
+- Exclude ONLY vulnerabilities whose required constructs or patterns are clearly
+  absent from the code.
+- Copy candidate names VERBATIM from the catalog.
+- Include at most {max_shortlist} candidates, most plausible first.
+
+─── OUTPUT ───────────────────────────────────────────────────────────────────
+{format_instructions}
+
+Output Rules
+- Return ONLY valid JSON after your analysis.
+- Every name in "candidate_vulnerabilities" must be copied exactly from the catalog.
+"""
+
+#--------------------------------------------------------------------------------------------------------
 
 DETECTOR_RAG_PROMPT_TEMPLATE = """\
 You are a specialized Solidity vulnerability DETECTOR. Your sole mission is to
