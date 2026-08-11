@@ -113,6 +113,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume-dir",       default=None,              help="Path to an existing results dir to resume")
     p.add_argument("--store-raw",        action="store_true",       help="Store raw LLM responses in CSV")
     p.add_argument("--debug",            action="store_true",       help="Print full prompts for each LLM call")
+    p.add_argument("--verbose",          action="store_true",       help="Saída detalhada por par (desliga a interface limpa com barras de progresso)")
     p.add_argument("--conversation",     action="store_true",       help="Print full Detector↔Reviewer conversation after each pair")
     p.add_argument("--save-conversation", default=None, metavar="FILE",
                                          help="Write conversation log to FILE (one entry per pair, appended)")
@@ -127,6 +128,9 @@ def main() -> None:
     args = parse_args()
 
     use_reviewer = not args.no_reviewer
+    # Interface limpa (barras de progresso, uma operação por vez) por padrão.
+    # Desligada automaticamente quando se pede saída detalhada (debug/conversa/verbose).
+    clean_ui = not (args.verbose or args.debug or args.conversation)
 
     # ── Build Config from CLI args ────────────────────────────────────────────
     cfg = Config(
@@ -182,6 +186,7 @@ def main() -> None:
     print(f"Triage:      {cfg.triage.use_triage}  (max-shortlist={cfg.triage.max_shortlist_size})")
     print(f"Max rounds:  {cfg.agent.max_rounds if use_reviewer else 'N/A (single-agent)'}")
     print(f"Runs:        {cfg.eval.n_runs}")
+    print(f"Interface:   {'limpa (barras de progresso)' if clean_ui else 'detalhada (verbose)'}")
 
     # ── Resolve effective subset size ─────────────────────────────────────────
     # Priority: --subset CLI > use_test_subset config toggle > full dataset
@@ -279,6 +284,7 @@ def main() -> None:
         show_conversation=args.conversation,
         save_conversation=args.save_conversation,
         show_prompts=not args.no_prompts,
+        clean=clean_ui,
     )
     total_time_seconds = _time.time() - _eval_start
 

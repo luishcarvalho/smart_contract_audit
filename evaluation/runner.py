@@ -12,12 +12,15 @@ Features:
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+from tqdm import tqdm
 
 from smart_contract_audit_agents.config import Config
 from smart_contract_audit_agents.evaluation.metrics import Metrics, classify_pair
@@ -77,36 +80,53 @@ def analyze_pair(
     show_conversation: bool = False,
     save_conversation: "str | None" = None,
     show_prompts: bool = True,
+    clean: bool = False,
 ) -> Dict[str, Any]:
     """Analyse one (contract, vulnerability) pair and return a result dict."""
     contract_idx  = example_data["index"]
     contract_name = example_data["name"]
     code          = example_data["code"]
 
-    banner(f"CONTRACT ANALYSIS | idx={contract_idx} | {contract_name}", char="-")
-    print(f"Ground Truth:  {example_data['vulnerability']}")
-    print(f"Target vuln:   {vulnerability_name}")
-    print(f"Code:          {len(code)} chars | {len(code.splitlines())} lines")
+    if not clean:
+        banner(f"CONTRACT ANALYSIS | idx={contract_idx} | {contract_name}", char="-")
+        print(f"Ground Truth:  {example_data['vulnerability']}")
+        print(f"Target vuln:   {vulnerability_name}")
+        print(f"Code:          {len(code)} chars | {len(code.splitlines())} lines")
 
     start = time.time()
     try:
-        response = pipeline.forward(
-            query=code,
-            vulnerability_name=vulnerability_name,
-            vulnerability_description=vulnerability_description,
-            debug=debug,
-        )
-
-        print_llm_preview(
-            response,
-            title=f"LLM RESPONSE PREVIEW | target={vulnerability_name}",
-            max_chars=900,
-            max_lines=14,
-        )
+        if clean:
+            # Interface limpa: silencia os prints internos dos nós; só erros/retries
+            # sobem via tqdm.write para não quebrar as barras de progresso.
+            _buf = io.StringIO()
+            with contextlib.redirect_stdout(_buf):
+                response = pipeline.forward(
+                    query=code,
+                    vulnerability_name=vulnerability_name,
+                    vulnerability_description=vulnerability_description,
+                    debug=debug,
+                )
+            for _line in _buf.getvalue().splitlines():
+                _low = _line.lower()
+                if "retry" in _low or "failed after" in _low or "traceback" in _low:
+                    tqdm.write(_line)
+        else:
+            response = pipeline.forward(
+                query=code,
+                vulnerability_name=vulnerability_name,
+                vulnerability_description=vulnerability_description,
+                debug=debug,
+            )
+            print_llm_preview(
+                response,
+                title=f"LLM RESPONSE PREVIEW | target={vulnerability_name}",
+                max_chars=900,
+                max_lines=14,
+            )
 
         conv_log = response.get("conversation_log", [])
 
-        if show_conversation:
+        if show_conversation and not clean:
             print_conversation_log(
                 conv_log,
                 title=f"{contract_name}  │  {vulnerability_name}",
@@ -123,7 +143,8 @@ def analyze_pair(
                 )
 
         elapsed = time.time() - start
-        print(f"\nCompleted in {elapsed:.2f}s")
+        if not clean:
+            print(f"\nCompleted in {elapsed:.2f}s")
 
         retrieval_mode = response.get("retrieval_mode", "unknown")
         parsed = response.get("parsed_response", {})
@@ -162,21 +183,22 @@ def analyze_pair(
         is_predicted_positive = (final_verdict == "PRESENT")
         predicted_vulns = [vulnerability_name] if is_predicted_positive else []
 
-        if triage_filtered:
+        if not clean:
+            if triage_filtered:
+                print(
+                    "\n[triage] Target vulnerability not in contract shortlist — "
+                    "auto-ABSENT (Detector/Reviewer skipped)"
+                )
             print(
-                "\n[triage] Target vulnerability not in contract shortlist — "
-                "auto-ABSENT (Detector/Reviewer skipped)"
+                f"\nDetector: {detector_verdict} ({detector_confidence:.2f}) | "
+                f"Reviewer: {reviewer_verdict} ({reviewer_confidence:.2f}) | "
+                f"Final: {final_verdict} ({final_confidence:.2f}) via {reconciliation_rule}"
             )
-        print(
-            f"\nDetector: {detector_verdict} ({detector_confidence:.2f}) | "
-            f"Reviewer: {reviewer_verdict} ({reviewer_confidence:.2f}) | "
-            f"Final: {final_verdict} ({final_confidence:.2f}) via {reconciliation_rule}"
-        )
-        print(f"Issues found: {len(detector_issues)}")
-        for i, issue in enumerate(detector_issues[:5], 1):
-            print(f"  {i}. [{issue.get('severity','?')}] {issue.get('description','')[:160]}")
-        if len(detector_issues) > 5:
-            print(f"  ... (+{len(detector_issues)-5} more)")
+            print(f"Issues found: {len(detector_issues)}")
+            for i, issue in enumerate(detector_issues[:5], 1):
+                print(f"  {i}. [{issue.get('severity','?')}] {issue.get('description','')[:160]}")
+            if len(detector_issues) > 5:
+                print(f"  ... (+{len(detector_issues)-5} more)")
 
         m = classify_pair(
             example_data["vulnerability"],
@@ -184,8 +206,9 @@ def analyze_pair(
             predicted_vulns,
         )
 
-        print(f"\nGT positive: {bool(m.tp + m.fn)} | Pred positive: {is_predicted_positive}")
-        print(f"TP={m.tp} FP={m.fp} TN={m.tn} FN={m.fn}")
+        if not clean:
+            print(f"\nGT positive: {bool(m.tp + m.fn)} | Pred positive: {is_predicted_positive}")
+            print(f"TP={m.tp} FP={m.fp} TN={m.tn} FN={m.fn}")
 
         return {
             "run": None,
@@ -228,7 +251,10 @@ def analyze_pair(
 
     except Exception as e:
         elapsed = time.time() - start
-        print(f"\nFAILED: {type(e).__name__}: {e}")
+        if clean:
+            tqdm.write(f"[FAIL] idx={contract_idx} · {vulnerability_name}: {type(e).__name__}: {e}")
+        else:
+            print(f"\nFAILED: {type(e).__name__}: {e}")
         return {
             "run": None,
             "example_name": contract_name,
@@ -281,6 +307,7 @@ def run_evaluation(
     show_conversation: bool = False,
     save_conversation: "str | None" = None,
     show_prompts: bool = True,
+    clean: bool = False,
 ) -> tuple[List[Dict], List[Dict], str]:
     """Run the full evaluation loop with incremental saving.
 
@@ -321,7 +348,10 @@ def run_evaluation(
     total_start = time.time()
 
     for run in range(ecfg.resume_run, ecfg.n_runs + 1):
-        banner(f"STARTING RUN {run}/{ecfg.n_runs}")
+        if clean:
+            tqdm.write(f"══════ RUN {run}/{ecfg.n_runs} ══════")
+        else:
+            banner(f"STARTING RUN {run}/{ecfg.n_runs}")
 
         run_metrics = Metrics()
         run_start   = time.time()
@@ -331,6 +361,16 @@ def run_evaluation(
             if not (ecfg.skip_contract and ex["index"] == ecfg.skip_contract_index)
         ]
 
+        # Barra ÚNICA (robusta em tmux/SSH): progresso por PAR sobre todos os
+        # contratos. Barras aninhadas com position= vazavam escapes ^[[A no tmux;
+        # uma barra só usa apenas \r e mostra contrato atual + placar na linha.
+        total_pairs = len(eligible) * len(vuln_desc_df)
+        bar = (
+            tqdm(total=total_pairs, desc="Auditoria", unit="par",
+                 dynamic_ncols=True, mininterval=0.5, smoothing=0.05)
+            if clean else None
+        )
+
         for contract_pos, example_data in enumerate(eligible, 1):
             contract_idx = example_data["index"]
             original_pos = next(
@@ -338,11 +378,12 @@ def run_evaluation(
                 if ex["index"] == contract_idx
             )
 
-            banner(
-                f"CONTRACT {contract_pos}/{len(eligible)} "
-                f"| original={original_pos}/{len(selected_examples)} "
-                f"| idx={contract_idx} | RUN {run}"
-            )
+            if not clean:
+                banner(
+                    f"CONTRACT {contract_pos}/{len(eligible)} "
+                    f"| original={original_pos}/{len(selected_examples)} "
+                    f"| idx={contract_idx} | RUN {run}"
+                )
 
             contract_m     = Metrics()
             contract_start = time.time()
@@ -354,15 +395,25 @@ def run_evaluation(
 
                 # Skip already-done pairs (resume)
                 if (run, contract_idx, vuln_name) in done_pairs:
-                    print(f"  [skip] already done: run={run} idx={contract_idx} vuln={vuln_name}")
+                    if clean:
+                        bar.update(1)
+                    else:
+                        print(f"  [skip] already done: run={run} idx={contract_idx} vuln={vuln_name}")
                     continue
 
-                print(
-                    f"\nRUN {run} | Contract {contract_pos}/{len(eligible)} "
-                    f"| idx={contract_idx} "
-                    f"| Vuln [{v_idx+1}/{len(vuln_desc_df)}]: {vuln_name}"
-                )
-                print(hr("-"))
+                if clean:
+                    bar.set_description(
+                        f"Contrato {contract_pos}/{len(eligible)} (idx={contract_idx}) "
+                        f"· vuln {v_idx + 1}/{len(vuln_desc_df)}"
+                    )
+                    bar.set_postfix_str(f"→ {vuln_name[:24]}")
+                else:
+                    print(
+                        f"\nRUN {run} | Contract {contract_pos}/{len(eligible)} "
+                        f"| idx={contract_idx} "
+                        f"| Vuln [{v_idx+1}/{len(vuln_desc_df)}]: {vuln_name}"
+                    )
+                    print(hr("-"))
 
                 result = analyze_pair(
                     pipeline,
@@ -374,6 +425,7 @@ def run_evaluation(
                     show_conversation=show_conversation,
                     save_conversation=save_conversation,
                     show_prompts=show_prompts,
+                    clean=clean,
                 )
                 result["run"] = run
                 result["contract_position_in_run"] = contract_pos
@@ -391,6 +443,16 @@ def run_evaluation(
                                      tn=result["tn"], fn=result["fn"])
                 contract_m = contract_m + pair_m
                 n_eval    += 1
+
+                if clean:
+                    _tag = ("TP" if result["tp"] else "FP" if result["fp"]
+                            else "FN" if result["fn"] else "TN")
+                    _rm = run_metrics + contract_m  # placar acumulado até aqui
+                    bar.set_postfix_str(
+                        f"{vuln_name[:14]}→{result.get('final_verdict', '?')[:3]}[{_tag}] | "
+                        f"TP={_rm.tp} FP={_rm.fp} FN={_rm.fn} MCC={_rm.mcc:.3f}"
+                    )
+                    bar.update(1)
 
             contract_time = time.time() - contract_start
             contract_row = {
@@ -412,21 +474,38 @@ def run_evaluation(
 
             run_metrics = run_metrics + contract_m
 
-            print(hr("-"))
-            print(
-                f"CONTRACT SUMMARY | idx={contract_idx} | RUN {run} | "
-                f"TP={contract_m.tp} FP={contract_m.fp} "
-                f"TN={contract_m.tn} FN={contract_m.fn} | "
-                f"time={contract_time:.1f}s"
-            )
-            print(hr("-"))
+            if clean:
+                tqdm.write(
+                    f"✓ contrato {contract_pos}/{len(eligible)} (idx={contract_idx}) "
+                    f"em {contract_time:.0f}s · TP={run_metrics.tp} FP={run_metrics.fp} "
+                    f"FN={run_metrics.fn} TN={run_metrics.tn} | MCC={run_metrics.mcc:.3f}"
+                )
+            else:
+                print(hr("-"))
+                print(
+                    f"CONTRACT SUMMARY | idx={contract_idx} | RUN {run} | "
+                    f"TP={contract_m.tp} FP={contract_m.fp} "
+                    f"TN={contract_m.tn} FN={contract_m.fn} | "
+                    f"time={contract_time:.1f}s"
+                )
+                print(hr("-"))
+
+        if clean and bar is not None:
+            bar.close()
 
         run_time = time.time() - run_start
-        print(hr())
-        print(f"RUN {run} COMPLETE | {run_time/60:.2f} min")
-        print(f"RUN TOTALS: TP={run_metrics.tp} FP={run_metrics.fp} "
-              f"TN={run_metrics.tn} FN={run_metrics.fn}")
-        print(hr())
+        if clean:
+            tqdm.write(
+                f"Run {run} completo em {run_time/60:.1f} min | "
+                f"TP={run_metrics.tp} FP={run_metrics.fp} TN={run_metrics.tn} "
+                f"FN={run_metrics.fn} | MCC={run_metrics.mcc:.4f}"
+            )
+        else:
+            print(hr())
+            print(f"RUN {run} COMPLETE | {run_time/60:.2f} min")
+            print(f"RUN TOTALS: TP={run_metrics.tp} FP={run_metrics.fp} "
+                  f"TN={run_metrics.tn} FN={run_metrics.fn}")
+            print(hr())
 
     total_time = time.time() - total_start
     banner("EVALUATION COMPLETE")

@@ -83,10 +83,12 @@ Usado pela classe `OWASPLookup` para injetar contexto de referência nos prompts
 
 Usado apenas na **construção do vectorstore**. Contém contratos rotulados para gerar os embeddings. Colunas esperadas: `code`, `vulnerability`, `line`, `source`.
 
-### 5. Vectorstore ChromaDB (pré-construído)
-**Caminho:** `/home/luis.carvalho/smart_contract_audit/langchain_smart_contract_chromadb`
+### 5. Vectorstore ChromaDB
+**Caminho:** `/home/luis.carvalho/smart_contract_audit_agents/chromadb_jina_code_cosine`
 
-Base vetorial persistida com os embeddings dos contratos de treino. Carregada automaticamente se existir; caso contrário, construída a partir do `all_data.parquet`. Usada pelo nó de recuperação (RAG) para buscar exemplos similares ao contrato em análise.
+Base vetorial persistida com os embeddings dos contratos de treino. Carregada automaticamente se existir; caso contrário, **construída a partir do `all_data.parquet`** (embedding dos ~27,7k documentos — custo único). Usada pelo nó de recuperação (RAG) para buscar exemplos similares ao contrato em análise.
+
+> **Embedder e distância:** os embeddings usam o modelo especializado em código **`jinaai/jina-embeddings-v2-base-code`** (768-dim, normalizado) e a distância **cosseno** (`hnsw:space`). Como isso difere do build antigo (MiniLM 384-dim, L2), o store fica num **caminho novo e é reconstruído do zero na primeira execução com RAG**. Para forçar rebuild, apague a pasta acima e o checkpoint `langchain_embedding_checkpoint_jina.pkl`.
 
 ---
 
@@ -111,18 +113,20 @@ Config(
 |---|---|---|---|
 | LLM | `model` | `gemma3:27b` | Modelo Ollama |
 | LLM | `temperature` | `0.2` | Temperatura da geração |
-| LLM | `num_ctx` | `40960` | Janela de contexto em tokens |
+| LLM | `num_ctx` | `65536` | Janela de contexto em tokens (medido: maior contrato ~18,5k tokens; VRAM ~24/46 GB numa A40) |
 | LLM | `num_predict` | `1024` | Máximo de tokens gerados |
-| LLM | `max_code_chars` | `150000` | Truncamento do contrato |
+| LLM | `max_code_chars` | `250000` | Truncamento do contrato (nenhum contrato dos test sets atuais chega perto) |
 | LLM | `max_retries` | `3` | Tentativas em caso de crash |
-| Embedding | `use_fast` | `True` | `True`=MiniLM (CPU); `False`=starcoder2:3b (Ollama) |
+| Embedding | `use_fast` | `True` | `True`=HuggingFace (jina code, CPU); `False`=starcoder2:3b (Ollama) |
+| Embedding | `fast_model` | `jinaai/jina-embeddings-v2-base-code` | Embedder especializado em código, 768-dim |
+| Embedding | `distance` | `cosine` | Métrica de distância do ChromaDB (com embeddings normalizados) |
 | Retrieval | `use_rag` | `True` | Habilita/desabilita RAG |
-| Retrieval | `top_k` | `3` | Documentos recuperados por query |
+| Retrieval | `top_k` | `5` | Documentos recuperados por query (cada exemplo é truncado a 500 chars) |
 | Retrieval | `use_hybrid` | `True` | Filtro por categoria + fallback semântico |
 | Agent | `use_reviewer` | `True` | Dual-agent (True) ou single-agent (False) |
 | Agent | `max_rounds` | `3` | Máximo de rodadas de debate antes da reconciliação |
 | Triage | `use_triage` | `True` | Habilita o pré-filtro de triage por contrato |
-| Triage | `max_shortlist_size` | `15` | Máximo de vulnerabilidades candidatas mantidas por contrato |
+| Triage | `max_shortlist_size` | `25` | Máximo de vulnerabilidades candidatas mantidas por contrato (subido de 15 p/ reduzir FN sistemático) |
 | Data | `owasp_registry_path` | `.../owasp_scwe.csv` | Catálogo OWASP SCWE |
 | Data | `use_test_subset` | `False` | `True` = avalia apenas `test_subset_size` contratos (toggle rápido) |
 | Data | `test_subset_size` | `5` | Contratos a avaliar quando `use_test_subset=True` |
@@ -494,8 +498,8 @@ para cada run em [1..n_runs]:
 Para cada par `(contrato, vulnerabilidade_alvo)`, `classify_pair` computa uma classificação binária:
 
 ```
-ground_truth_positive = (ground_truth_vuln.lower() == target_vuln.lower())   # match exato
-predicted_positive    = (final_verdict == "PRESENT")                          # SEM threshold de confiança
+ground_truth_positive = (_norm_label(ground_truth_vuln) == _norm_label(target_vuln))  # match exato normalizado
+predicted_positive    = (final_verdict == "PRESENT")                                   # SEM threshold de confiança
 
 TP: GT=positivo, Pred=positivo
 FP: GT=negativo, Pred=positivo
@@ -503,10 +507,12 @@ TN: GT=negativo, Pred=negativo
 FN: GT=positivo, Pred=negativo
 ```
 
-- O ground truth é positivo **apenas** quando o rótulo do contrato é exatamente igual (case-insensitive) à vulnerabilidade-alvo da iteração — por isso o rótulo do test set precisa pertencer ao vocabulário de `vulnerabilities_description.csv`.
-- A predição é positiva quando o veredicto final reconciliado é `PRESENT` (o `runner` monta `predicted_vulns = [vuln_name]` se `PRESENT`, senão `[]`; `classify_pair` casa por substring entre alvo e predição). **Não há corte por `final_confidence`** — a confiança é registrada apenas como coluna de diagnóstico, não afeta TP/FP/TN/FN.
+- O ground truth é positivo **apenas** quando o rótulo do contrato é igual à vulnerabilidade-alvo da iteração **por igualdade normalizada** (`_norm_label`: minúsculas + colapso de qualquer caractere não-alfanumérico em espaço). Isso tolera diferenças de pontuação/espaçamento entre o rótulo do test set e o vocabulário, mas exige que o rótulo pertença ao vocabulário de `vulnerabilities_description.csv`.
+- A predição é positiva quando o veredicto final reconciliado é `PRESENT` (o `runner` monta `predicted_vulns = [vuln_name]` se `PRESENT`, senão `[]`). O casamento agora é por **igualdade normalizada** (não mais substring), evitando falsos pares como `"access control" ⊂ "access control bug"`. **Não há corte por `final_confidence`** — a confiança é registrada apenas como coluna de diagnóstico, não afeta TP/FP/TN/FN.
 
-Métricas calculadas: Precision, Recall, F1, Accuracy.
+**Métricas calculadas:** Precision, Recall (TPR), **Specificity (TNR)**, F1, **Balanced accuracy**, **MCC** e Accuracy.
+
+> ⚠️ Dado o forte desbalanceamento (a esmagadora maioria dos pares é TN), a **Accuracy é enganosa** (fica ~0,94 mesmo com F1 ~0,16). Use **MCC** como número-resumo principal e **Balanced accuracy** / **Specificity** para leitura complementar. Todas são reportadas por run em `results_global.csv` e no `experiment_summary.md`.
 
 ---
 
@@ -519,7 +525,7 @@ Ao fim da avaliação, são gerados 5 arquivos em `results/<model>/<MM-YYYY>/<ta
 | `results_pairs.csv` | Um row por par (run, contrato, vulnerabilidade) com TP/FP/TN/FN, veredictos, confiança, raciocínio |
 | `results_contract.csv` | Sumário por contrato: soma de TP/FP/TN/FN, tempo |
 | `results_vuln.csv` | Métricas agregadas por tipo de vulnerabilidade (inclui métricas de debate) |
-| `results_global.csv` | Métricas globais por run (Precision, Recall, F1, Accuracy) |
+| `results_global.csv` | Métricas globais por run (Precision, Recall, Specificity, F1, Balanced accuracy, MCC, Accuracy) |
 | `experiment_summary.md` | Relatório Markdown com configuração, matriz de confusão, top vulnerabilidades por F1 e **auditoria da triage** (quando ativa) |
 
 ### Colunas em `results_pairs.csv` — dual-agent
@@ -579,8 +585,8 @@ python run.py --max-rounds 5
 # Desabilitar a camada de triage (avalia todas as vulnerabilidades, sem pré-filtro)
 python run.py --no-triage
 
-# Ajustar o tamanho máximo da shortlist de triage (padrão: 15)
-python run.py --max-shortlist 20
+# Ajustar o tamanho máximo da shortlist de triage (padrão: 25)
+python run.py --max-shortlist 30
 
 # Usar um test set customizado (qualquer CSV com colunas: code, vulnerability, line)
 python run.py --test /caminho/para/meu_testset.csv
@@ -592,7 +598,14 @@ python run.py --subset 10
 # Equivalente a --subset 5 quando use_test_subset=True e test_subset_size=5
 python run.py
 
-# Modo debug: imprime prompts completos durante a execução
+# Interface do terminal:
+#   - PADRÃO: interface limpa com barras de progresso (uma operação por vez):
+#     uma barra para o contrato atual (progresso pelas 61 vulnerabilidades) e
+#     uma para o todo (progresso pelos contratos), com placar TP/FP/TN/FN e MCC ao vivo.
+#   - --verbose restaura a saída detalhada por par (banners + preview do LLM):
+python run.py --verbose
+
+# Modo debug: imprime prompts completos durante a execução (implica saída detalhada)
 python run.py --subset 1 --debug
 
 # Imprimir transcrição completa Detector↔Reviewer no terminal após cada par
@@ -620,7 +633,7 @@ python run.py --resume-dir results/gemma3-27b/05-2026/rag_10-05-26_12-00-00
 |---|---|
 | `langchain-ollama` | Interface com o servidor Ollama (LLM + embeddings) |
 | `langchain-chroma` | Vectorstore ChromaDB |
-| `langchain-huggingface` | HuggingFace embeddings (MiniLM) |
+| `langchain-huggingface` | HuggingFace embeddings (jina code embedder, via sentence-transformers) |
 | `langchain-core` | Documentos, mensagens, parsers Pydantic |
 | `langgraph` | Orquestração do grafo de agentes (inclui suporte a loops cíclicos) |
 | `pydantic` | Schemas de saída do LLM (parsing JSON) |

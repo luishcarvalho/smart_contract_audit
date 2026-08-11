@@ -88,6 +88,9 @@ def build_vectorstore(
                 documents=batch,
                 embedding=embeddings,
                 persist_directory=persist_path,
+                # HNSW distance space is fixed at collection-creation time.
+                # cfg.distance="cosine" pairs with normalized embeddings.
+                collection_metadata={"hnsw:space": cfg.distance},
             )
         else:
             vectorstore.add_documents(batch)

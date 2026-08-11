@@ -13,5 +13,12 @@ def build_llm(cfg: LLMConfig) -> OllamaLLM:
         num_ctx=cfg.num_ctx,
         temperature=cfg.temperature,
         num_predict=cfg.num_predict,
+        # Disable the model's internal <think> block. Hybrid reasoning models
+        # (e.g. qwen3.6) otherwise emit a long thinking trace that eats the whole
+        # num_predict budget before the JSON, causing truncation → parse errors
+        # and huge latency. The prompts already ask for step-by-step reasoning in
+        # the answer text, so this only removes the hidden thinking. Harmless for
+        # non-thinking models (gemma3), which ignore the option.
+        reasoning=False,
         client_kwargs={"timeout": cfg.timeout},
     )

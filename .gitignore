@@ -1,6 +1,9 @@
 # Resultados de experimentos
 results/
 
+# Dados de embedding
+chromadb_jina_code_cosine/
+
 # Python
 __pycache__/
 *.pyc

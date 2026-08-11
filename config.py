@@ -15,18 +15,22 @@ from dataclasses import dataclass, field
 # ─────────────────────────────────────────────
 @dataclass
 class LLMConfig:
-    model: str = "gemma3:27b"
+    model: str = "qwen3.6:27b"
     base_url: str = "http://localhost:11434"
     temperature: float = 0.2
-    num_ctx: int = 40_960       # max prompt breakdown (RAG mode, largest contract):
-                                #   code ~32K tokens + template ~1K + RAG ctx ~660 + fmt ~360 = ~34K total
-                                #   40960 leaves ~7K token safety buffer
-    num_predict: int = 1024
+    num_ctx: int = 65_536       # context window. Measured: largest test contract ~18.5K tokens,
+                                #   so even with top_k=5 RAG + template the prompt stays <22K.
+                                #   65536 is generous headroom for larger test sets. VRAM cost
+                                #   measured on an A40: ~24GB / 46GB with gemma3:27b (KV f16).
+    num_predict: int = 2048     # raised from 1024: coder/thinking models can emit reasoning
+                                #   before the JSON; 1024 risked truncating the output mid-JSON
+                                #   (parse errors). 2048 leaves room for the analysis + JSON.
     timeout: int = 600          # seconds (connect + read)
     max_retries: int = 3        # retries on Ollama runner crash (failed to sample token)
     retry_delay: float = 5.0    # seconds between retries
-    max_code_chars: int = 150_000  # safety truncation: largest contract in dataset = ~130K chars
-                                   # budget with RAG overhead = ~157K chars, so 150K gives a 7K buffer
+    max_code_chars: int = 250_000  # safety truncation only. No contract in the current test sets
+                                    # reaches this; raised from 150K so large contracts are not
+                                    # cut before the model's own context window even applies.
 
 
 # ─────────────────────────────────────────────
@@ -34,13 +38,21 @@ class LLMConfig:
 # ─────────────────────────────────────────────
 @dataclass
 class EmbeddingConfig:
-    use_fast: bool = True                          # True = MiniLM (CPU), False = starcoder2:3b (Ollama)
-    fast_model: str = "all-MiniLM-L6-v2"
+    use_fast: bool = True                          # True = HuggingFace (local), False = Ollama slow_model
+    # Code-specialized embedder (768-dim). Beats the general-purpose MiniLM at
+    # retrieving structurally similar Solidity. Loaded via sentence-transformers
+    # with trust_remote_code=True.
+    fast_model: str = "jinaai/jina-embeddings-v2-base-code"
     slow_model: str = "starcoder2:3b"
+    trust_remote_code: bool = True                 # required by the jina custom model class
+    normalize_embeddings: bool = True              # unit-normalize so cosine distance is exact
+    distance: str = "cosine"                        # ChromaDB HNSW space: cosine | l2 | ip
     batch_size: int = 128
-    checkpoint_path: str = "langchain_embedding_checkpoint.pkl"
-    # Points to the shared vectorstore built by smart_contract_audit
-    vectorstore_path: str = "/home/luis.carvalho/smart_contract_audit/langchain_smart_contract_chromadb"
+    # Separate checkpoint + store from the old MiniLM build: the embedding
+    # dimensionality (384 → 768) and distance (l2 → cosine) both changed, so the
+    # store MUST be rebuilt from scratch on the next RAG run (one-time cost).
+    checkpoint_path: str = "langchain_embedding_checkpoint_jina.pkl"
+    vectorstore_path: str = "/home/luis.carvalho/smart_contract_audit_agents/chromadb_jina_code_cosine"
 
 
 # ─────────────────────────────────────────────
@@ -49,7 +61,8 @@ class EmbeddingConfig:
 @dataclass
 class RetrievalConfig:
     use_rag: bool = True        # True = RAG pipeline; False = direct LLM
-    top_k: int = 3
+    top_k: int = 5              # retrieved examples per pair (raised from 3 — extra context is
+                                # cheap: each example is truncated to 500 chars ≈ ~130 tokens)
     use_hybrid: bool = True     # True = category filter + semantic fallback; False = semantic only
     vuln_metadata_field: str = "vulnerability"  # ChromaDB metadata key for vulnerability category
 
@@ -75,7 +88,9 @@ class TriageConfig:
     # One LLM call per contract shortlists plausible vulnerabilities;
     # pairs outside the shortlist are auto-resolved as ABSENT (rule "triage_filtered")
     use_triage: bool = True
-    max_shortlist_size: int = 15   # hard cap on candidates kept per contract
+    max_shortlist_size: int = 15   # hard cap on candidates kept per contract (raised from 15 to
+                                   # cut the systematic FN the triage was introducing — the last
+                                   # full run discarded 54 GT-positive pairs at shortlist=15)
 
 
 # ─────────────────────────────────────────────

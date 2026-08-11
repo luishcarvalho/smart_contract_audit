@@ -140,6 +140,13 @@ def save_results(
     global_df["accuracy"]  = global_df.apply(
         lambda r: _safe_div(r.tp + r.tn, r.tp + r.fp + r.tn + r.fn), axis=1
     )
+    global_df["specificity"] = global_df.apply(lambda r: _safe_div(r.tn, r.tn + r.fp), axis=1)
+    global_df["balanced_accuracy"] = global_df.apply(
+        lambda r: (_safe_div(r.tp, r.tp + r.fn) + _safe_div(r.tn, r.tn + r.fp)) / 2, axis=1
+    )
+    global_df["mcc"] = global_df.apply(
+        lambda r: Metrics(tp=int(r.tp), fp=int(r.fp), tn=int(r.tn), fn=int(r.fn)).mcc, axis=1
+    )
 
     # ── Overall totals ────────────────────────────────────────────────────────
     totals = successful[["tp", "fp", "tn", "fn"]].sum()
@@ -207,7 +214,8 @@ def save_results(
 
     # ── Markdown summary ──────────────────────────────────────────────────────
     run_table  = _df_to_md(
-        global_df[["run", "n_pairs", "tp", "fp", "tn", "fn", "precision", "recall", "f1", "accuracy"]]
+        global_df[["run", "n_pairs", "tp", "fp", "tn", "fn",
+                   "precision", "recall", "specificity", "f1", "balanced_accuracy", "mcc", "accuracy"]]
     )
     vuln_table = _vuln_top_table(vuln_df, n=15)
 
@@ -256,6 +264,7 @@ def save_results(
 | RAG enabled | `{cfg.retrieval.use_rag}` |
 | Top-k | `{cfg.retrieval.top_k}` |
 | Embedding model | `{cfg.embedding.fast_model if cfg.embedding.use_fast else cfg.embedding.slow_model}` |
+| Distance metric | `{cfg.embedding.distance}` |
 
 ### Evaluation
 
@@ -300,9 +309,12 @@ def save_results(
 | Metric | Value |
 | --- | --- |
 | Precision | **{m.precision:.4f}** |
-| Recall | **{m.recall:.4f}** |
+| Recall (TPR) | **{m.recall:.4f}** |
+| Specificity (TNR) | **{m.specificity:.4f}** |
 | F1-score | **{m.f1:.4f}** |
-| Accuracy | **{m.accuracy:.4f}** |
+| Balanced accuracy | **{m.balanced_accuracy:.4f}** |
+| **MCC** | **{m.mcc:.4f}** |
+| Accuracy (imbalance-inflated) | **{m.accuracy:.4f}** |
 {triage_section}
 ---
 
@@ -338,7 +350,7 @@ def save_results(
 | `reviewer_verdict` | CONFIRMED, REFUTED, or UNCERTAIN |
 | `reviewer_confidence` | Reviewer confidence (0.0–1.0) |
 | `reviewer_reasoning` | Reviewer explanation |
-| `reconciliation_rule` | `consensus_round_N` or `weighted_arbitration_round_N` (or `rule_0_detector_only`) |
+| `reconciliation_rule` | `consensus_round_N`, `reviewer_authority_refuted_round_N`, `detector_prevails_uncertain_round_N`, `triage_filtered`, or `rule_0_detector_only` |
 | `rounds_to_consensus` | Rounds until agreement, or `max_rounds` on impasse |
 | `consensus_reached` | True if Reviewer confirmed Detector before the round limit |
 | `reconciliation_weight_ratio` | Dominant weight ratio in weighted arbitration (0.0 on consensus) |
@@ -360,6 +372,9 @@ def save_results(
         f.write(md)
 
     print(f"\nResults saved to: {output_dir}")
-    print(f"Precision={m.precision:.4f} | Recall={m.recall:.4f} | F1={m.f1:.4f} | Accuracy={m.accuracy:.4f}")
+    print(
+        f"Precision={m.precision:.4f} | Recall={m.recall:.4f} | Specificity={m.specificity:.4f} | "
+        f"F1={m.f1:.4f} | BalAcc={m.balanced_accuracy:.4f} | MCC={m.mcc:.4f} | Accuracy={m.accuracy:.4f}"
+    )
 
     return output_dir
