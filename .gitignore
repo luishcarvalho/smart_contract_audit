@@ -30,3 +30,7 @@ conversa2.txt
 
 # Resumo técnico (documento local)
 RESUMO_TECNICO.md
+
+# Auditoria de vazamento: o CSV de casamentos é regenerável em segundos
+# (python data_audit/check_leakage.py) e pesa ~17 MB. O relatório fica versionado.
+data_audit/leakage_matches.csv
