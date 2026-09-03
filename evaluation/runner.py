@@ -26,6 +26,7 @@ from smart_contract_audit_agents.config import Config
 from smart_contract_audit_agents.evaluation.metrics import Metrics, classify_pair
 from smart_contract_audit_agents.utils.display import banner, hr, print_conversation_log, print_llm_preview
 from smart_contract_audit_agents.utils.io import safe_json_dumps
+from smart_contract_audit_agents.utils.vuln_desc_lookup import _norm as _norm_vuln
 
 
 # ─── Incremental CSV writer ───────────────────────────────────────────────────
@@ -51,6 +52,22 @@ class IncrementalCSV:
             index=False,
         )
         self._exists = True
+
+
+def _triage_rank(shortlist: List[str], target: str) -> "int | str":
+    """1-based position of *target* in *shortlist*, or "" if it is not there.
+
+    Uses the same normalisation the triage node uses to match catalog names
+    (utils.vuln_desc_lookup._norm), so the rank agrees with the shortlist
+    membership test in pipeline/nodes.py.
+    """
+    if not shortlist:
+        return ""
+    tgt = _norm_vuln(str(target))
+    for i, name in enumerate(shortlist, 1):
+        if _norm_vuln(str(name)) == tgt:
+            return i
+    return ""
 
 
 def _already_done(pairs_csv: str) -> set[tuple]:
@@ -175,6 +192,7 @@ def analyze_pair(
         # Triage fields
         triage_candidate = bool(response.get("triage_candidate", True))
         triage_filtered  = reconciliation_rule == "triage_filtered"
+        triage_shortlist = response.get("triage_shortlist", []) or []
 
         # Issues always come from the Detector
         detector_issues = analysis.get("issues", []) or []
@@ -247,6 +265,12 @@ def analyze_pair(
             # Triage columns
             "triage_candidate": triage_candidate,
             "triage_filtered": triage_filtered,
+            # Triage audit columns: the shortlist the triage produced for this
+            # contract and where the target sat in it. Logged so max_shortlist
+            # can be swept post-hoc without re-running the pipeline.
+            "triage_shortlist": safe_json_dumps(triage_shortlist, max_chars=8_000),
+            "triage_shortlist_size": len(triage_shortlist),
+            "triage_rank": _triage_rank(triage_shortlist, vulnerability_name),
         }
 
     except Exception as e:
@@ -292,6 +316,9 @@ def analyze_pair(
             # Triage columns (defaults on failure)
             "triage_candidate": True,
             "triage_filtered": False,
+            "triage_shortlist": "",
+            "triage_shortlist_size": 0,
+            "triage_rank": "",
         }
 
 
