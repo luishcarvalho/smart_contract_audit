@@ -118,8 +118,11 @@ def load_corpus(path: str) -> pd.DataFrame:
 def load_testset(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     df["code"] = df["code"].astype(str)
-    # dataset_index is 1-based, matching evaluation.runner's example["index"]
-    df["dataset_index"] = range(1, len(df) + 1)
+    # dataset_index is 0-BASED, matching example["index"] in run.py, which comes
+    # from `for idx, row in subset.iterrows()` — the DataFrame's positional label.
+    # Verified against the reference run: ground-truth labels line up 268/268
+    # with 0-based and only 77/267 with 1-based.
+    df["dataset_index"] = range(len(df))
     return df
 
 
