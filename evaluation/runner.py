@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import time
 from datetime import datetime
@@ -23,6 +24,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from smart_contract_audit_agents.config import Config
+from smart_contract_audit_agents.evaluation.evidence import issue_evidence_counts
 from smart_contract_audit_agents.evaluation.metrics import Metrics, classify_pair
 from smart_contract_audit_agents.utils.display import banner, hr, print_conversation_log, print_llm_preview
 from smart_contract_audit_agents.utils.io import safe_json_dumps
@@ -52,6 +54,25 @@ class IncrementalCSV:
             index=False,
         )
         self._exists = True
+
+
+class JsonlSidecar:
+    """Appends one JSON object per line to a file, creating it on first write.
+
+    Used for the raw Detector output, which does not fit a CSV cell: the
+    existing `raw_response_json` column runs through safe_json_dumps with a
+    20 000-char cap, and a whole `response` (it carries conversation_log, i.e.
+    the full prompts) is far larger than that — the stored value is truncated
+    mid-string and no longer parses as JSON.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    def append(self, obj: Dict[str, Any]) -> None:
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
 
 
 def _triage_rank(shortlist: List[str], target: str) -> "int | str":
@@ -197,6 +218,13 @@ def analyze_pair(
         # Issues always come from the Detector
         detector_issues = analysis.get("issues", []) or []
 
+        # Evidence audit (measurement only — does NOT influence any verdict).
+        # Counts how many issues would satisfy the evidence requirements the
+        # Detector prompt already states but nothing enforces.
+        evidence_counts = issue_evidence_counts(
+            detector_issues, code, vulnerability_name
+        )
+
         # Prediction: verdict from the Reconciler is the final decision
         is_predicted_positive = (final_verdict == "PRESENT")
         predicted_vulns = [vulnerability_name] if is_predicted_positive else []
@@ -246,6 +274,21 @@ def analyze_pair(
             "timestamp": datetime.now().isoformat(),
             "n_lines": len(code.splitlines()),
             "raw_response_json": safe_json_dumps(response) if store_raw_response else "",
+            # Popped by the caller into raw_detector/<run>.jsonl — never a CSV
+            # column. Holds the full issues[] (line_numbers included), which the
+            # truncated raw_response_json cannot reliably carry.
+            "_raw_detector": {
+                "issues": detector_issues,
+                "detector_verdict": detector_verdict,
+                "detector_confidence": detector_confidence,
+                "detector_reasoning": detector_reasoning,
+                "reviewer_verdict": reviewer_verdict,
+                "reviewer_reasoning": reviewer_reasoning,
+                "final_verdict": final_verdict,
+                "reconciliation_rule": reconciliation_rule,
+                "n_lines": len(code.splitlines()),
+                **evidence_counts,
+            } if store_raw_response else None,
             "retrieval_mode": retrieval_mode,
             "skipped": False,
             "skip_reason": "",
@@ -271,6 +314,8 @@ def analyze_pair(
             "triage_shortlist": safe_json_dumps(triage_shortlist, max_chars=8_000),
             "triage_shortlist_size": len(triage_shortlist),
             "triage_rank": _triage_rank(triage_shortlist, vulnerability_name),
+            # Evidence audit columns (logging only)
+            **evidence_counts,
         }
 
     except Exception as e:
@@ -319,6 +364,10 @@ def analyze_pair(
             "triage_shortlist": "",
             "triage_shortlist_size": 0,
             "triage_rank": "",
+            "n_issues_admissible": 0,
+            "n_issues_with_lines": 0,
+            "n_issues_with_snippet": 0,
+            "n_issues_type_match": 0,
         }
 
 
@@ -363,6 +412,8 @@ def run_evaluation(
 
     pair_writer     = IncrementalCSV(pair_csv)
     contract_writer = IncrementalCSV(contract_csv)
+    # Raw Detector output (only written when store_raw_response is on)
+    raw_dir = os.path.join(output_dir, "raw_detector")
 
     # ── Detect already-done pairs (resume support) ────────────────────────────
     done_pairs = _already_done(pair_csv)
@@ -379,6 +430,11 @@ def run_evaluation(
             tqdm.write(f"══════ RUN {run}/{ecfg.n_runs} ══════")
         else:
             banner(f"STARTING RUN {run}/{ecfg.n_runs}")
+
+        raw_writer = (
+            JsonlSidecar(os.path.join(raw_dir, f"run{run}.jsonl"))
+            if ecfg.store_raw_response else None
+        )
 
         run_metrics = Metrics()
         run_start   = time.time()
@@ -455,6 +511,19 @@ def run_evaluation(
                     clean=clean,
                 )
                 result["run"] = run
+                # Move the raw Detector payload out of the row: it goes to the
+                # sidecar, keyed by (run, dataset_index, target_vulnerability),
+                # so results_pairs.csv keeps one flat row per pair.
+                raw_payload = result.pop("_raw_detector", None)
+                if raw_payload is not None and raw_writer is not None:
+                    raw_writer.append({
+                        "run": run,
+                        "dataset_index": contract_idx,
+                        "target_vulnerability": vuln_name,
+                        "example_name": example_data["name"],
+                        "ground_truth_vulnerability": example_data["vulnerability"],
+                        **raw_payload,
+                    })
                 result["contract_position_in_run"] = contract_pos
                 result["total_contracts_in_run"]   = len(eligible)
                 result["contract_position_original"] = original_pos
