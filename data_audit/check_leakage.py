@@ -46,6 +46,7 @@ import hashlib
 import os
 import re
 import sys
+import zlib
 from collections import defaultdict
 from typing import Dict, List, Sequence, Tuple
 
@@ -95,11 +96,16 @@ def tokenise(text: str) -> List[str]:
 
 
 def shingles(tokens: Sequence[str], k: int) -> set:
-    """Hashed k-token shingles. Empty when the text is shorter than k tokens."""
+    """Hashed k-token shingles. Empty when the text is shorter than k tokens.
+
+    crc32, not the built-in hash(): Python randomises string hashing per process,
+    so collisions — and therefore the reported counts — would drift between runs
+    of a report meant to be cited.
+    """
     if len(tokens) < k:
         return set()
     return {
-        hash(" ".join(tokens[i : i + k]))
+        zlib.crc32(" ".join(tokens[i : i + k]).encode("utf-8"))
         for i in range(len(tokens) - k + 1)
     }
 
