@@ -246,8 +246,10 @@ def analyze_pair(
             if len(detector_issues) > 5:
                 print(f"  ... (+{len(detector_issues)-5} more)")
 
+        # Multi-label: usa a lista canônica quando existe (formato novo), e cai
+        # na string única no formato legado. O CSV segue gravando a string.
         m = classify_pair(
-            example_data["vulnerability"],
+            example_data.get("vulnerability_labels") or example_data["vulnerability"],
             vulnerability_name,
             predicted_vulns,
         )
@@ -261,6 +263,9 @@ def analyze_pair(
             "example_name": contract_name,
             "dataset_index": contract_idx,
             "ground_truth_vulnerability": example_data["vulnerability"],
+            "gt_label_count": len(example_data.get("vulnerability_labels") or [example_data["vulnerability"]]),
+            "label_families": example_data.get("label_families", ""),
+            "file_path": example_data.get("file_path", ""),
             "target_vulnerability": vulnerability_name,
             "is_ground_truth_positive": bool(m.tp + m.fn),
             "is_predicted_positive": is_predicted_positive,
@@ -329,6 +334,9 @@ def analyze_pair(
             "example_name": contract_name,
             "dataset_index": contract_idx,
             "ground_truth_vulnerability": example_data["vulnerability"],
+            "gt_label_count": len(example_data.get("vulnerability_labels") or [example_data["vulnerability"]]),
+            "label_families": example_data.get("label_families", ""),
+            "file_path": example_data.get("file_path", ""),
             "target_vulnerability": vulnerability_name,
             "is_ground_truth_positive": False,
             "is_predicted_positive": False,

@@ -49,6 +49,7 @@ from smart_contract_audit_agents.config import (
     RetrievalConfig,
     TriageConfig,
 )
+from smart_contract_audit_agents.evaluation.dataset import format_info, load_examples
 from smart_contract_audit_agents.evaluation.results import save_results
 from smart_contract_audit_agents.evaluation.runner import run_evaluation
 from smart_contract_audit_agents.models.llm import build_llm
@@ -170,6 +171,8 @@ def main() -> None:
             train_path=args.train,
             test_path=args.test,
             vuln_desc_path=args.vulns,
+            in_scope_only=args.in_scope,
+            code_column=args.code_column,
             # test_subset_size and use_test_subset come from config.py defaults
         ),
     )

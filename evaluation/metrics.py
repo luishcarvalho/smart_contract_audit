@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Iterable
 
 
 @dataclass
@@ -83,6 +83,19 @@ def _safe_div(num: float, den: float) -> float:
     return num / den if den != 0 else 0.0
 
 
+def _norm_label_set(labels: "str | Iterable[str]") -> set[str]:
+    """Normalize one label or a collection of them into a set.
+
+    A bare string stays one label — it is NOT split — so legacy single-label
+    datasets keep behaving exactly as before.
+    """
+    if labels is None:
+        return set()
+    if isinstance(labels, str):
+        return {_norm_label(labels)}
+    return {_norm_label(l) for l in labels if str(l).strip()}
+
+
 def _norm_label(s: str) -> str:
     """Normalize a vulnerability label for comparison: lowercase, collapse any
     run of non-alphanumeric characters to a single space, strip. Makes matching
@@ -92,13 +105,14 @@ def _norm_label(s: str) -> str:
 
 
 def classify_pair(
-    ground_truth_vuln: str,
+    ground_truth_vuln: "str | Iterable[str]",
     target_vuln: str,
     predicted_vulns: list[str],
 ) -> Metrics:
     """Return binary TP/FP/TN/FN for one (contract, target vulnerability) pair.
 
-    ground_truth_vuln  : the vulnerability label on the contract
+    ground_truth_vuln  : the label(s) on the contract — a single string, or any
+                         iterable of strings for a multi-label ground truth
     target_vuln        : the vulnerability we asked the LLM to detect
     predicted_vulns    : issue names extracted from the LLM JSON output
 
@@ -106,10 +120,15 @@ def classify_pair(
     (see _norm_label). The previous substring test could pair unrelated labels
     (e.g. "access control" ⊂ "access control bug"); normalized equality avoids
     those false matches while still tolerating punctuation/spacing differences.
+
+    Multi-label: a file carrying several documented bugs is positive for EVERY
+    one of its labels. With a single-label ground truth, detecting a second real
+    bug of the same file scored as a false positive — 68.3% of the bugs in the
+    current Web3Bugs extraction live in such files, so that mattered.
     """
-    gt_norm = _norm_label(ground_truth_vuln)
+    gt_norms = _norm_label_set(ground_truth_vuln)
     tgt_norm = _norm_label(target_vuln)
-    is_gt_positive = gt_norm == tgt_norm
+    is_gt_positive = tgt_norm in gt_norms
 
     preds_norm = {_norm_label(v) for v in predicted_vulns}
     is_pred_positive = tgt_norm in preds_norm

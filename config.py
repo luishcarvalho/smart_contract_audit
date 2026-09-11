@@ -117,7 +117,17 @@ class EvalConfig:
 @dataclass
 class DataConfig:
     train_path: str = "/home/luis.carvalho/all_data.parquet"
-    test_path: str = "/home/luis.carvalho/gervais_dataset.csv"
+    # Extração determinística do Web3Bugs: uma linha por bug, com file_path e
+    # vulnerability_mapped. O carregador agrupa por arquivo e o ground truth vira
+    # o CONJUNTO de rótulos daquele arquivo — 68,3% dos bugs vivem em arquivos
+    # com mais de um bug, e antes cada irmão desses contava como falso positivo.
+    test_path: str = "/home/luis.carvalho/web3bugs/extract/out/web3bugs_testset.csv"
+    # Descarta a família O, que o próprio artigo Web3Bugs declara fora de escopo
+    # (96 dos 467 bugs). Só tem efeito no formato multi-rótulo.
+    in_scope_only: bool = True
+    # "code" = com comentários; "code_no_comments" existe no CSV irmão e serve
+    # para a ablação de viés lexical.
+    code_column: str = "code"
     vuln_desc_path: str = "/home/luis.carvalho/vulnerabilities_description.csv"
     owasp_registry_path: str = "/home/luis.carvalho/owasp_scwe.csv"
     test_subset_size: int = 5    # contracts to evaluate when use_test_subset=True

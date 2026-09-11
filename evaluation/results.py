@@ -148,6 +148,46 @@ def save_results(
         lambda r: Metrics(tp=int(r.tp), fp=int(r.fp), tn=int(r.tn), fn=int(r.fn)).mcc, axis=1
     )
 
+    # ── Eixo duplo: todos os tipos × só os representáveis ─────────────────────
+    # Um tipo sem nenhum positivo no ground truth só pode gerar FP ou TN: ele
+    # nunca acerta, por construção do benchmark. Restringir o eixo a esses tipos
+    # NÃO melhora o detector — muda o escopo da medida. Por isso os dois números
+    # aparecem lado a lado, com a diferença explicada, em vez de um substituir o
+    # outro. O eixo restrito é também o recorte que a comparação com o GPTScan exige.
+    gt_types = set(
+        successful.loc[successful["is_ground_truth_positive"], "target_vulnerability"].unique()
+    )
+    restricted = successful[successful["target_vulnerability"].isin(gt_types)]
+
+    def _axis_metrics(frame: pd.DataFrame) -> Metrics:
+        t = frame[["tp", "fp", "tn", "fn"]].sum()
+        return Metrics(tp=int(t["tp"]), fp=int(t["fp"]), tn=int(t["tn"]), fn=int(t["fn"]))
+
+    m_full = _axis_metrics(successful)
+    m_restricted = _axis_metrics(restricted)
+    n_all_types = successful["target_vulnerability"].nunique()
+
+    axis_section = f"""
+---
+
+## Métricas nos dois eixos
+
+| | Eixo completo | Eixo restrito |
+| --- | --- | --- |
+| Tipos avaliados | {n_all_types} | {len(gt_types)} (só os presentes no ground truth) |
+| Pares | {len(successful)} | {len(restricted)} |
+| TP / FP / TN / FN | {m_full.tp} / {m_full.fp} / {m_full.tn} / {m_full.fn} | {m_restricted.tp} / {m_restricted.fp} / {m_restricted.tn} / {m_restricted.fn} |
+| Precisão | **{m_full.precision:.4f}** | **{m_restricted.precision:.4f}** |
+| Recall | **{m_full.recall:.4f}** | **{m_restricted.recall:.4f}** |
+| F1 | {m_full.f1:.4f} | {m_restricted.f1:.4f} |
+| MCC | **{m_full.mcc:.4f}** | **{m_restricted.mcc:.4f}** |
+
+> Os {n_all_types - len(gt_types)} tipos ausentes do ground truth não podem produzir
+> TP: eles contribuem {m_full.fp - m_restricted.fp} FP e {m_full.tn - m_restricted.tn} TN.
+> O eixo restrito **não** mede um detector melhor — mede o mesmo detector num
+> universo menor. Reporte os dois; usar só o restrito seria maquiagem de métrica.
+"""
+
     # ── Overall totals ────────────────────────────────────────────────────────
     totals = successful[["tp", "fp", "tn", "fn"]].sum()
     m = Metrics(
@@ -192,6 +232,8 @@ def save_results(
 | GT-positive pairs discarded by triage (systematic FN) | {n_gt_pos_filtered} |
 | Pairs resolved via `triage_filtered` (Detector/Reviewer skipped) | {n_filtered} ({filter_rate:.1%} of all pairs) |
 """
+
+    triage_section = triage_section + axis_section
 
     # ── Agent mode info ───────────────────────────────────────────────────────
     use_reviewer = cfg.agent.use_reviewer
