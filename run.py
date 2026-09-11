@@ -101,6 +101,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train",   default=_data.train_path)
     p.add_argument("--test",    default=_data.test_path)
     p.add_argument("--vulns",   default=_data.vuln_desc_path)
+    p.add_argument("--in-scope", action=argparse.BooleanOptionalAction,
+                   default=_data.in_scope_only,
+                   help="Dataset multi-rótulo: manter só bugs em escopo "
+                        "(descarta a família O). --no-in-scope inclui todos.")
+    p.add_argument("--code-column", default=_data.code_column,
+                   help="Coluna de código a analisar: 'code' (com comentários) "
+                        "ou 'code_no_comments', se o CSV tiver.")
     p.add_argument("--subset",  type=int, default=0,
                                      help="Max contracts to evaluate (0=use config/all)")
 
@@ -205,26 +212,16 @@ def main() -> None:
 
     # ── Load datasets ─────────────────────────────────────────────────────────
     banner("Loading datasets")
-    test_df = pd.read_csv(cfg.data.test_path)
-    if "line" not in [c.lower() for c in test_df.columns]:
-        test_df["line"] = 0
-
     vuln_desc_df = pd.read_csv(cfg.data.vuln_desc_path)
-    print(f"Test contracts:      {len(test_df)}")
-    print(f"Vulnerability types: {len(vuln_desc_df)}")
 
-    # ── Prepare selected examples ─────────────────────────────────────────────
-    subset = test_df if effective_subset == 0 else test_df.iloc[:effective_subset]
-    selected_examples = [
-        {
-            "name": f"{row['vulnerability']} Example {idx}",
-            "code": row["code"],
-            "vulnerability": row["vulnerability"],
-            "line": row.get("line", 0),
-            "index": idx,
-        }
-        for idx, row in subset.iterrows()
-    ]
+    selected_examples, dataset_info = load_examples(
+        cfg.data.test_path,
+        in_scope_only=cfg.data.in_scope_only,
+        subset=effective_subset,
+        code_column=cfg.data.code_column,
+    )
+    print(format_info(dataset_info, len(vuln_desc_df)))
+    print(f"Vulnerability types: {len(vuln_desc_df)}")
     print(f"Selected examples:   {len(selected_examples)}")
 
     # ── Build LLM ─────────────────────────────────────────────────────────────

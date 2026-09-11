@@ -30,10 +30,8 @@ import tempfile
 
 import pandas as pd
 
-sys.path.insert(
-    0,
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-)
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(REPO))
 
 from smart_contract_audit_agents.config import Config  # noqa: E402
 from smart_contract_audit_agents.evaluation.runner import run_evaluation  # noqa: E402
@@ -122,6 +120,49 @@ class StubPipeline:
         }
 
 
+def check_cli_path() -> list:
+    """Confere o caminho do run.py: flags declaradas/consumidas e carregamento.
+
+    O teste do laço chama run_evaluation direto, então não cobre o run.py — e foi
+    aí que um patch parcial passou batido até a execução real falhar em
+    `args.in_scope`. Aqui as flags são conferidas no fonte (declarada E usada, que
+    é o par que quebra quando só metade de um patch entra) e o carregador roda de
+    verdade sobre o test set configurado. Sem Ollama.
+    """
+    from smart_contract_audit_agents.config import DEFAULT_CONFIG
+    from smart_contract_audit_agents.evaluation.dataset import load_examples
+
+    data_cfg = DEFAULT_CONFIG.data
+    checks = [
+        ("config.data.in_scope_only existe", hasattr(data_cfg, "in_scope_only"), True),
+        ("config.data.code_column existe", hasattr(data_cfg, "code_column"), True),
+    ]
+
+    run_py = os.path.join(REPO, "run.py")
+    src = open(run_py, encoding="utf-8").read()
+    for flag, attr in (("--in-scope", "args.in_scope"),
+                       ("--code-column", "args.code_column")):
+        checks.append((
+            f"{flag}: declarada no parser e lida em main()",
+            (f'"{flag}"' in src, attr in src),
+            (True, True),
+        ))
+
+    try:
+        examples, _ = load_examples(
+            data_cfg.test_path,
+            in_scope_only=data_cfg.in_scope_only,
+            subset=2,
+            code_column=data_cfg.code_column,
+        )
+        got = bool(examples) and all("vulnerability_labels" in e for e in examples)
+    except Exception as exc:  # noqa: BLE001
+        got = f"ERRO: {type(exc).__name__}: {exc}"
+    checks.append(("load_examples no test set do config", got, True))
+
+    return checks
+
+
 def main() -> int:
     out_dir = tempfile.mkdtemp(prefix="verify_instrumentation_")
     try:
@@ -191,11 +232,14 @@ def main() -> int:
         check("TP preservado", int(by_target.loc["reentrancy", "tp"]), 1)
         check("TN preservado", int(by_target.loc["front running", "tn"]), 1)
 
+        checks.extend(check_cli_path())
+
         width = max(len(c[0]) for c in checks)
         print()
         print(f"{'verificação'.ljust(width)}  {'obtido':<12} {'esperado':<12} ")
         print("-" * (width + 30))
         failed = 0
+        checks = [(c[0], c[1], c[2], c[1] == c[2]) if len(c) == 3 else c for c in checks]
         for label, got, exp, ok in checks:
             if not ok:
                 failed += 1
