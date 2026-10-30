@@ -39,14 +39,25 @@ class IncrementalCSV:
     The header is written once on first write; subsequent writes append
     without re-opening the full file.  Safe to resume: if the file already
     exists, new rows are appended and the header is skipped.
+
+    Every appended row is reindexed to the header's columns. Rows are written
+    without a header, so a row whose keys differ in set or order from the first
+    one (e.g. a failure row) would otherwise land shifted under the wrong columns.
     """
 
     def __init__(self, path: str) -> None:
         self.path = path
         self._exists = os.path.exists(path)
+        self._columns: "List[str] | None" = (
+            list(pd.read_csv(path, nrows=0).columns) if self._exists else None
+        )
 
     def append(self, row: Dict[str, Any]) -> None:
         df = pd.DataFrame([row])
+        if self._columns is None:
+            self._columns = list(df.columns)
+        else:
+            df = df.reindex(columns=self._columns)
         df.to_csv(
             self.path,
             mode="a",
@@ -73,6 +84,19 @@ class JsonlSidecar:
     def append(self, obj: Dict[str, Any]) -> None:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
+
+
+class DetectorParseError(Exception):
+    """Detector output unparseable after a retry; the pair is recorded as a failure."""
+
+
+def _is_gt_positive(example_data: Dict[str, Any], target: str) -> bool:
+    m = classify_pair(
+        example_data.get("vulnerability_labels") or example_data["vulnerability"],
+        target,
+        [],
+    )
+    return bool(m.fn)
 
 
 def _triage_rank(shortlist: List[str], target: str) -> "int | str":
@@ -184,6 +208,11 @@ def analyze_pair(
         if not clean:
             print(f"\nCompleted in {elapsed:.2f}s")
 
+        if response.get("detector_parse_failed", False):
+            # Resposta ilegivel mesmo apos a segunda chamada: o par vira erro e
+            # sai da matriz de confusao (caminho de falha abaixo, success=False).
+            raise DetectorParseError("Detector output unparseable after a retry")
+
         retrieval_mode = response.get("retrieval_mode", "unknown")
         parsed = response.get("parsed_response", {})
         if hasattr(parsed, "model_dump"):
@@ -275,6 +304,7 @@ def analyze_pair(
             "predicted_vulnerabilities": predicted_vulns,
             "parsed_ok": True,
             "success": True,
+            "error": "",
             "analysis_time": elapsed,
             "timestamp": datetime.now().isoformat(),
             "n_lines": len(code.splitlines()),
@@ -338,10 +368,11 @@ def analyze_pair(
             "label_families": example_data.get("label_families", ""),
             "file_path": example_data.get("file_path", ""),
             "target_vulnerability": vulnerability_name,
-            "is_ground_truth_positive": False,
+            "is_ground_truth_positive": _is_gt_positive(example_data, vulnerability_name),
             "is_predicted_positive": False,
             "tp": 0, "fp": 0, "tn": 0, "fn": 0,
             "issues_count": 0,
+            "model_confidence": 0.0,
             "predicted_vulnerabilities": [],
             "parsed_ok": False,
             "success": False,

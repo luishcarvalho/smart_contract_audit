@@ -220,6 +220,19 @@ def triage_reject_node(state: RAGState) -> dict:
     }
 
 
+def detector_error_node(state: RAGState) -> dict:
+    """Close a pair whose Detector output stayed unparseable after the retry.
+
+    No LLM call — skips Reviewer/Reconciler. The runner records the pair as a
+    failure (success=False), so it is reported apart and kept out of TP/FP/TN/FN.
+    """
+    return {
+        "final_verdict": "ERROR",
+        "final_confidence": 0.0,
+        "reconciliation_rule": "detector_parse_error",
+    }
+
+
 # ─── RAG nodes ────────────────────────────────────────────────────────────────
 
 def make_retrieve_node(
@@ -378,60 +391,64 @@ def make_detector_node(
             print("=" * 80)
             print("Sending detector prompt to LLM...\n")
 
-        last_error: Exception | None = None
-        raw_response = ""
-        for attempt in range(1, max_retries + 1):
-            try:
-                raw_response = llm.invoke(prompt)
-                state["response"] = raw_response
-                state["messages"].append(HumanMessage(content="Detector analysis completed"))
-                break
-            except Exception as e:
-                last_error = e
-                is_ollama_crash = any(
-                    kw in str(e).lower()
-                    for kw in ("eof", "connection", "failed to sample", "500", "timeout")
-                )
-                if is_ollama_crash and attempt < max_retries:
-                    print(
-                        f"\n[Detector retry {attempt}/{max_retries}] Ollama runner error: {e}. "
-                        f"Waiting {retry_delay}s before retry..."
+        def _invoke() -> str:
+            last_error: Exception | None = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    raw = llm.invoke(prompt)
+                    state["messages"].append(HumanMessage(content="Detector analysis completed"))
+                    return raw
+                except Exception as e:
+                    last_error = e
+                    is_ollama_crash = any(
+                        kw in str(e).lower()
+                        for kw in ("eof", "connection", "failed to sample", "500", "timeout")
                     )
-                    time.sleep(retry_delay)
-                else:
-                    raw_response = f"Detector failed after {max_retries} attempts: {last_error}"
-                    state["response"] = raw_response
-                    state["messages"].append(
-                        HumanMessage(content=f"Detector failed: {last_error}")
-                    )
-                    break
+                    if is_ollama_crash and attempt < max_retries:
+                        print(
+                            f"\n[Detector retry {attempt}/{max_retries}] Ollama runner error: {e}. "
+                            f"Waiting {retry_delay}s before retry..."
+                        )
+                        time.sleep(retry_delay)
+                    else:
+                        break
+            state["messages"].append(HumanMessage(content=f"Detector failed: {last_error}"))
+            return f"Detector failed after {max_retries} attempts: {last_error}"
 
-        # Parse detector output
-        try:
-            parsed = _detector_parser.parse(raw_response)
-            analysis = parsed.model_dump()
-        except Exception as primary_err:
+        def _parse(raw: str) -> "dict | None":
             try:
-                match = re.search(r"\{.*\}", raw_response, re.DOTALL)
-                if match:
-                    analysis = json.loads(match.group())
-                else:
-                    raise ValueError("No JSON found in detector response")
+                return _detector_parser.parse(raw).model_dump()
             except Exception:
-                analysis = {
-                    "issues": [
-                        {
-                            "issue": "analysis_error",
-                            "description": (
-                                f"Failed to parse detector response: {primary_err}. "
-                                f"Raw: {raw_response[:200]}..."
-                            ),
-                            "severity": "low",
-                        }
-                    ],
-                    "confidence": 0.0,
-                    "summary": "Detector completed with parsing errors",
-                }
+                match = re.search(r"\{.*\}", raw, re.DOTALL)
+                if match:
+                    try:
+                        data = json.loads(match.group())
+                        if isinstance(data, dict):
+                            return data
+                    except Exception:
+                        pass
+                return None
+
+        # Uma resposta ilegivel ganha uma segunda chamada. Se a segunda tambem
+        # falhar, o par e marcado como erro e sai do grafo sem veredicto:
+        # antes, o fallback criava uma issue "analysis_error" e o par virava
+        # PRESENT, contando como FP em quase todo par negativo.
+        raw_response = _invoke()
+        analysis = _parse(raw_response)
+        if analysis is None:
+            print("[Detector] Unparseable response — retrying the call once")
+            raw_response = _invoke()
+            analysis = _parse(raw_response)
+
+        parse_failed = analysis is None
+        if parse_failed:
+            analysis = {
+                "issues": [],
+                "confidence": 0.0,
+                "summary": "Detector output could not be parsed after a retry",
+            }
+        state["response"] = raw_response
+        state["detector_parse_failed"] = parse_failed
 
         issues = analysis.get("issues", []) or []
         confidence = float(analysis.get("confidence", 0.0))

@@ -44,6 +44,7 @@ from langgraph.graph import END, StateGraph
 from smart_contract_audit_agents.config import Config
 from smart_contract_audit_agents.models.schemas import RAGState
 from smart_contract_audit_agents.pipeline.nodes import (
+    detector_error_node,
     feedback_node,
     generate_context_node,
     make_detector_node,
@@ -68,6 +69,16 @@ def should_continue_debate(state: RAGState) -> str:
     if state.get("current_round", 1) >= state.get("max_rounds", 3):
         return "reconcile"
     return "feedback"
+
+
+def route_after_detector(state: RAGState) -> str:
+    """Conditional edge after detector_node.
+
+    Returns:
+      "error" — output unparseable even after a retry → pair ends as error
+      "ok"    — continue to the Reviewer (or the Reconciler, single-agent)
+    """
+    return "error" if state.get("detector_parse_failed", False) else "ok"
 
 
 def route_after_triage(state: RAGState) -> str:
@@ -166,9 +177,19 @@ class AuditPipeline:
         else:
             graph.set_entry_point(analysis_entry)
 
+        graph.add_node("detector_error", detector_error_node)
+        graph.add_edge("detector_error", "parse_output")
+        graph.add_conditional_edges(
+            "detector",
+            route_after_detector,
+            {
+                "error": "detector_error",
+                "ok": "reviewer" if use_reviewer else "reconcile",
+            },
+        )
+
         if use_reviewer:
             graph.add_node("feedback", feedback_node)
-            graph.add_edge("detector", "reviewer")
             graph.add_conditional_edges(
                 "reviewer",
                 should_continue_debate,
@@ -178,8 +199,6 @@ class AuditPipeline:
                 },
             )
             graph.add_edge("feedback", "detector")
-        else:
-            graph.add_edge("detector", "reconcile")
 
         graph.add_edge("reconcile", "parse_output")
         graph.add_edge("parse_output", END)
@@ -232,6 +251,7 @@ class AuditPipeline:
             detector_confidence=0.0,
             detector_reasoning="",
             detector_issues=[],
+            detector_parse_failed=False,
             # Reviewer outputs (zeroed)
             reviewer_verdict="",
             reviewer_confidence=0.0,
@@ -281,6 +301,7 @@ class AuditPipeline:
             "detector_verdict": final_state.get("detector_verdict", "ABSENT"),
             "detector_confidence": final_state.get("detector_confidence", 0.0),
             "detector_reasoning": final_state.get("detector_reasoning", ""),
+            "detector_parse_failed": final_state.get("detector_parse_failed", False),
             # Reviewer fields
             "reviewer_verdict": final_state.get("reviewer_verdict", ""),
             "reviewer_confidence": final_state.get("reviewer_confidence", 0.0),

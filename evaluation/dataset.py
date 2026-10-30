@@ -20,7 +20,7 @@ arquivos com mais de um bug. No modo legado esses 319 empurravam a precisão
 para baixo artificialmente.
 
 Colunas do formato novo que este módulo usa:
-    file_path             identidade da unidade de avaliação
+    contest_id, file_path identidade da unidade de avaliação (o path é relativo ao contest)
     vulnerability_mapped  rótulo traduzido para o catálogo de 61 tipos
     in_scope              False para a família O, que o próprio artigo
                           Web3Bugs declara fora de escopo
@@ -138,9 +138,15 @@ def _load_multilabel(
         )
 
     examples: List[Dict[str, Any]] = []
+    # file_path é relativo ao contest: o mesmo caminho em dois contests (ex.:
+    # VaderPoolV2.sol nos contests 52 e 70) são arquivos diferentes, com código
+    # diferente. Agrupar só por file_path fundia os dois num exemplo com o código
+    # de um e os rótulos de ambos.
+    keys = ["contest_id", "file_path"] if "contest_id" in df.columns else ["file_path"]
     # sort=False preserva a ordem de aparição no CSV, então --subset N pega
     # sempre os mesmos arquivos e o resume continua válido.
-    for idx, (file_path, grp) in enumerate(df.groupby("file_path", sort=False)):
+    for idx, (key, grp) in enumerate(df.groupby(keys, sort=False)):
+        file_path = "/".join(str(k) for k in key) if isinstance(key, tuple) else str(key)
         labels = sorted({
             str(v).strip()
             for v in grp["vulnerability_mapped"].dropna()

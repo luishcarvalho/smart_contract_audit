@@ -73,6 +73,7 @@ class RAGState(TypedDict):
     detector_confidence: float
     detector_reasoning: str
     detector_issues: List[Dict]
+    detector_parse_failed: bool  # True → output unparseable after a retry; pair ends as error
 
     # Reviewer outputs
     reviewer_verdict: str       # "CONFIRMED" | "REFUTED" | "UNCERTAIN"

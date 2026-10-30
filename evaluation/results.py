@@ -88,8 +88,10 @@ def save_results(
         contracts_df = pd.DataFrame(contract_results)
 
     # ── Filter successful pairs ───────────────────────────────────────────────
+    # CSV round-trips can turn the column into strings ("True"), and then
+    # `== True` matches nothing and every metric below runs on an empty frame.
     successful = (
-        pairs_df[pairs_df["success"] == True]
+        pairs_df[_coerce_bool(pairs_df["success"])]
         if "success" in pairs_df.columns
         else pairs_df
     )
@@ -200,6 +202,15 @@ def save_results(
     n_contracts  = successful["dataset_index"].nunique() if "dataset_index" in successful.columns else "?"
     n_vuln_types = successful["target_vulnerability"].nunique() if "target_vulnerability" in successful.columns else "?"
     n_failed     = len(pairs_df) - len(successful)
+    failed_df    = pairs_df.drop(successful.index) if n_failed else pairs_df.iloc[0:0]
+    n_parse_err  = (
+        int(failed_df["error"].astype(str).str.startswith("DetectorParseError").sum())
+        if "error" in failed_df.columns else 0
+    )
+    n_failed_gt  = (
+        int(_coerce_bool(failed_df["is_ground_truth_positive"]).sum())
+        if "is_ground_truth_positive" in failed_df.columns else 0
+    )
     avg_time     = successful["analysis_time"].mean() if "analysis_time" in successful.columns else 0.0
 
     total_h = int(total_time_seconds // 3600)
@@ -335,7 +346,9 @@ def save_results(
 | Contracts evaluated | {n_contracts} |
 | Vulnerability types | {n_vuln_types} |
 | Total pairs | {len(successful)} |
-| Failed pairs (skipped) | {n_failed} |
+| Failed pairs (excluded from metrics) | {n_failed} |
+| — of which Detector output unparseable after retry | {n_parse_err} |
+| — of which ground-truth positive | {n_failed_gt} |
 | Avg. time per pair | {avg_time:.1f} s |
 | Total execution time | {total_time_str} |
 
